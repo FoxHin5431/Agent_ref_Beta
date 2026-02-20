@@ -1261,6 +1261,8 @@ def sanity_check(raw_text: str) -> list[str]:
 # =========================
 
 st.title("📚 Agent Ref")
+st.subheader("BETA VERSION")
+st.caption("This is a test version for new functions")
 
 if "sid" not in st.session_state:
     st.session_state["sid"] = str(uuid.uuid4())
@@ -1649,3 +1651,4 @@ FOOTER = """
 </div>
 """
 st.markdown(FOOTER, unsafe_allow_html=True)
+
