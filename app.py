@@ -1131,107 +1131,176 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
 # Excel Export (rich workbook)
 # =========================
 
-def build_excel_workbook(df: pd.DataFrame, debug_mode: bool = False) -> bytes:
-    base_order = [
-        "Ref #","Validation Result","Score","Is Review","Review Source","Review Notes","Reference","Domain","Domains",
-        "Extracted DOI","DOI Source","Crossref DOI","Crossref Journal","Crossref Year",
-        "PubMed ID","PubMed Journal","PubMed Year","Notes"
-    ]
-    debug_order = ["doi_explicit_ok","doi_derived_ok","year_ok","author_ok","journal_ok"]
-    desired = base_order + (debug_order if debug_mode else [])
-    cols = [c for c in desired if c in df.columns]
-    main = df[cols].copy()
+def build_excel_workbook(df: pd.DataFrame, debug_mode: bool = False, view: str = "Full") -> bytes:
+    export_df = df.copy()
+
+    # Add manual review columns for export
+    if "Manual review" not in export_df.columns:
+        export_df["Manual review"] = ""
+    if "Reviewer notes" not in export_df.columns:
+        export_df["Reviewer notes"] = ""
+
+    # Build either full or condensed export table
+    if view == "Condensed":
+        export_df["DOI score"] = export_df.apply(compute_doi_score, axis=1)
+        main_cols = ["Ref #", "Validation Result", "Score", "DOI score"]
+        if "Is Review" in export_df.columns:
+            main_cols.append("Is Review")
+        main_cols += ["Manual review", "Reviewer notes", "Notes", "Reference"]
+        main = export_df[[c for c in main_cols if c in export_df.columns]].copy()
+    else:
+        base_order = [
+            "Ref #", "Validation Result", "Score", "Is Review", "Review Source", "Review Notes",
+            "Manual review", "Reviewer notes",
+            "Reference", "Domain", "Domains",
+            "Extracted DOI", "DOI Source", "Crossref DOI", "Crossref Journal", "Crossref Year",
+            "PubMed ID", "PubMed Journal", "PubMed Year", "Notes"
+        ]
+        debug_order = ["doi_explicit_ok", "doi_derived_ok", "year_ok", "author_ok", "journal_ok"]
+        desired = base_order + (debug_order if debug_mode else [])
+        cols = [c for c in desired if c in export_df.columns]
+        main = export_df[cols].copy()
 
     for c in main.columns:
         if main[c].dtype == bool:
             main[c] = main[c].map({True: "True", False: "False"})
         main[c] = main[c].astype(str)
 
-    counts = df["Validation Result"].value_counts().rename_axis("Category").reset_index(name="Count")
+    counts = export_df["Validation Result"].value_counts().rename_axis("Category").reset_index(name="Count")
 
     top_domains = (
-        df["Domain"].replace("", pd.NA).dropna().value_counts()
+        export_df["Domain"].replace("", pd.NA).dropna().value_counts()
         .rename_axis("Domain").reset_index(name="Count").head(50)
     )
-    if "Domain" in df.columns and "Validation Result" in df.columns:
-        dom_mat = (df.assign(Domain=df["Domain"].replace("", pd.NA))
-                     .dropna(subset=["Domain"])
-                     .pivot_table(index="Domain",
-                                  columns="Validation Result",
-                                  values="Ref #",
-                                  aggfunc="count",
-                                  fill_value=0)
-                     .reset_index())
+
+    if "Domain" in export_df.columns and "Validation Result" in export_df.columns:
+        dom_mat = (
+            export_df.assign(Domain=export_df["Domain"].replace("", pd.NA))
+            .dropna(subset=["Domain"])
+            .pivot_table(
+                index="Domain",
+                columns="Validation Result",
+                values="Ref #",
+                aggfunc="count",
+                fill_value=0
+            )
+            .reset_index()
+        )
     else:
         dom_mat = pd.DataFrame()
 
-    issues = df[df["Validation Result"].isin(["⚠ Suspicious","❌ possible falsification","❌ Error"])][cols].copy()
+    issues = export_df[export_df["Validation Result"].isin(
+        ["⚠ Suspicious", "❌ possible falsification", "❌ Error"]
+    )].copy()
+
+    if view == "Condensed":
+        issues["DOI score"] = issues.apply(compute_doi_score, axis=1)
+        issue_cols = ["Ref #", "Validation Result", "Score", "DOI score"]
+        if "Is Review" in issues.columns:
+            issue_cols.append("Is Review")
+        issue_cols += ["Manual review", "Reviewer notes", "Notes", "Reference"]
+        issues = issues[[c for c in issue_cols if c in issues.columns]].copy()
+    else:
+        issues = issues[[c for c in main.columns if c in issues.columns]].copy()
 
     out = io.BytesIO()
     with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
         writer.book.strings_to_urls = False
 
-        fmt_header = writer.book.add_format({"bold": True, "text_wrap": True, "valign": "top"})
-        fmt_wrap   = writer.book.add_format({"text_wrap": True, "valign": "top"})
-        fmt_real   = writer.book.add_format({"bg_color": "#d4edda", "font_color": "#155724"})
-        fmt_web    = writer.book.add_format({"bg_color": "#e2e3e5", "font_color": "#383d41"})
-        fmt_susp   = writer.book.add_format({"bg_color": "#fff3cd", "font_color": "#856404"})
-        fmt_ai     = writer.book.add_format({"bg_color": "#f8d7da", "font_color": "#721c24"})
-        fmt_err    = writer.book.add_format({"bg_color": "#fde2e1", "font_color": "#7a1b17"})
+        workbook = writer.book
+
+        fmt_header = workbook.add_format({"bold": True, "text_wrap": True, "valign": "top"})
+        fmt_wrap = workbook.add_format({"text_wrap": True, "valign": "top"})
+        fmt_real = workbook.add_format({"bg_color": "#d4edda", "font_color": "#155724"})
+        fmt_web = workbook.add_format({"bg_color": "#e2e3e5", "font_color": "#383d41"})
+        fmt_susp = workbook.add_format({"bg_color": "#fff3cd", "font_color": "#856404"})
+        fmt_ai = workbook.add_format({"bg_color": "#f8d7da", "font_color": "#721c24"})
+        fmt_err = workbook.add_format({"bg_color": "#fde2e1", "font_color": "#7a1b17"})
 
         def autosize(ws, dataframe, wrap_cols=None):
             wrap_cols = wrap_cols or []
             for j, col in enumerate(dataframe.columns):
                 series = dataframe[col].astype(str)
                 max_len = max([len(col)] + [len(s) for s in series.tolist()])
-                cap = 90 if col in ("Reference","Notes") else 38 if col in ("Domains","Journal","PubMed Journal","Crossref Journal") else 28
+                if col in ("Reference", "Notes", "Reviewer notes"):
+                    cap = 90
+                elif col in ("Domains", "Journal", "PubMed Journal", "Crossref Journal"):
+                    cap = 38
+                else:
+                    cap = 28
                 width = min(max_len + 2, cap)
                 ws.set_column(j, j, width, fmt_wrap if col in wrap_cols else None)
+
+        def add_manual_review_dropdown(ws, dataframe):
+            if "Manual review" in dataframe.columns:
+                col_idx = list(dataframe.columns).index("Manual review")
+                nrows = max(len(dataframe), 200)
+                ws.data_validation(
+                    1, col_idx, nrows, col_idx,
+                    {
+                        "validate": "list",
+                        "source": ["Yes", "No"]
+                    }
+                )
 
         def write_table(sheet_name, dataframe, wrap_cols=None):
             if dataframe.empty:
                 pd.DataFrame({"Info": ["No data"]}).to_excel(writer, sheet_name=sheet_name, index=False)
                 return
+
             dataframe.to_excel(writer, sheet_name=sheet_name, index=False, startrow=0)
             ws = writer.sheets[sheet_name]
             nrows, ncols = dataframe.shape
-            ws.add_table(0, 0, nrows, ncols-1, {
+
+            ws.add_table(0, 0, nrows, ncols - 1, {
                 "header_row": True,
                 "style": "Table Style Medium 9",
                 "columns": [{"header": h} for h in dataframe.columns]
             })
+
             ws.set_row(0, None, fmt_header)
             ws.freeze_panes(1, 1)
             autosize(ws, dataframe, wrap_cols=wrap_cols)
+            add_manual_review_dropdown(ws, dataframe)
 
             if "Validation Result" in dataframe.columns:
                 col_idx = list(dataframe.columns).index("Validation Result")
                 first = 1
                 last = nrows
-                ws.conditional_format(first, col_idx, last, col_idx, {"type":"text","criteria":"containing","value":"Real","format":fmt_real})
-                ws.conditional_format(first, col_idx, last, col_idx, {"type":"text","criteria":"containing","value":"Web Source","format":fmt_web})
-                ws.conditional_format(first, col_idx, last, col_idx, {"type":"text","criteria":"containing","value":"Suspicious","format":fmt_susp})
-                ws.conditional_format(first, col_idx, last, col_idx, {"type":"text","criteria":"containing","value":"AI","format":fmt_ai})
-                ws.conditional_format(first, col_idx, last, col_idx, {"type":"text","criteria":"containing","value":"Error","format":fmt_err})
+                ws.conditional_format(first, col_idx, last, col_idx, {
+                    "type": "text", "criteria": "containing", "value": "Real", "format": fmt_real
+                })
+                ws.conditional_format(first, col_idx, last, col_idx, {
+                    "type": "text", "criteria": "containing", "value": "Web Source", "format": fmt_web
+                })
+                ws.conditional_format(first, col_idx, last, col_idx, {
+                    "type": "text", "criteria": "containing", "value": "Suspicious", "format": fmt_susp
+                })
+                ws.conditional_format(first, col_idx, last, col_idx, {
+                    "type": "text", "criteria": "containing", "value": "AI", "format": fmt_ai
+                })
+                ws.conditional_format(first, col_idx, last, col_idx, {
+                    "type": "text", "criteria": "containing", "value": "Error", "format": fmt_err
+                })
 
         st_counts = counts.copy()
         st_counts.to_excel(writer, sheet_name="Summary", index=False, startrow=0)
         ws_sum = writer.sheets["Summary"]
         ws_sum.set_row(0, None, fmt_header)
         ws_sum.freeze_panes(1, 0)
-        ws_sum.autofilter(0, 0, len(st_counts), len(st_counts.columns)-1)
+        ws_sum.autofilter(0, 0, len(st_counts), len(st_counts.columns) - 1)
         autosize(ws_sum, st_counts)
 
         startrow = len(st_counts) + 3
         ws_sum.write_string(startrow, 0, "Top Domains (first 50):", fmt_header)
         if not top_domains.empty:
-            top_domains.to_excel(writer, sheet_name="Summary", index=False, startrow=startrow+1)
-            ws_sum.autofilter(startrow+1, 0, startrow+1+len(top_domains), len(top_domains.columns)-1)
+            top_domains.to_excel(writer, sheet_name="Summary", index=False, startrow=startrow + 1)
+            ws_sum.autofilter(startrow + 1, 0, startrow + 1 + len(top_domains), len(top_domains.columns) - 1)
             autosize(ws_sum, top_domains)
         else:
-            ws_sum.write_string(startrow+1, 0, "No domains found.")
+            ws_sum.write_string(startrow + 1, 0, "No domains found.")
 
-        wrap_cols = ["Reference","Notes","Domains","Journal","PubMed Journal","Crossref Journal"]
+        wrap_cols = ["Reference", "Notes", "Reviewer notes", "Domains", "Journal", "PubMed Journal", "Crossref Journal"]
         write_table("Results", main, wrap_cols=wrap_cols)
         write_table("Issues", issues, wrap_cols=wrap_cols)
         write_table("Domains", dom_mat, wrap_cols=["Domain"])
@@ -1330,7 +1399,25 @@ table_view = st.selectbox(
 if debug_mode:
     st.info("Debug shows extra check columns and flags for explicit/derived/heuristic DOI, plus which checks passed.")
 
-user_input = st.text_area("Paste references here:", height=300)
+def clear_ref_input():
+    st.session_state["ref_input"] = ""
+
+if "ref_input" not in st.session_state:
+    st.session_state["ref_input"] = ""
+
+input_col, clear_col = st.columns([8, 1])
+
+with input_col:
+    user_input = st.text_area(
+        "Paste references here:",
+        height=300,
+        key="ref_input"
+    )
+
+with clear_col:
+    st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+    st.button("Clear box", on_click=clear_ref_input, use_container_width=True)
+
 
 if "prefix" not in st.session_state:
     st.session_state["prefix"] = ""
@@ -1587,21 +1674,26 @@ if st.button("Check References"):
                 )
                 st.caption("Note: Link columns shown as plain text in this Streamlit version.")
 
-
             today = date.today().isoformat()
-            csv_filename = f"{prefix}validated_references_{today}.csv"
-            csv_bytes = df.to_csv(index=False, quoting=csv.QUOTE_ALL).encode("utf-8")
-            st.download_button("Download results as CSV", csv_bytes, csv_filename, "text/csv")
 
-            xlsx_filename = f"{prefix}validated_references_{today}.xlsx"
-            xlsx_bytes = build_excel_workbook(df, debug_mode=debug_mode)
+            full_xlsx_filename = f"{prefix}validated_references_full_{today}.xlsx"
+            full_xlsx_bytes = build_excel_workbook(df, debug_mode=debug_mode, view="Full")
             st.download_button(
-                "Download Excel Workbook",
-                xlsx_bytes,
-                xlsx_filename,
+                "Download full Excel workbook",
+                full_xlsx_bytes,
+                full_xlsx_filename,
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
 
+            condensed_xlsx_filename = f"{prefix}validated_references_condensed_{today}.xlsx"
+            condensed_xlsx_bytes = build_excel_workbook(df, debug_mode=False, view="Condensed")
+            st.download_button(
+                "Download condensed Excel workbook",
+                condensed_xlsx_bytes,
+                condensed_xlsx_filename,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)
+           
             if used_fallback:
                 st.markdown("**Links:**")
                 link_rows = []
@@ -1651,4 +1743,3 @@ FOOTER = """
 </div>
 """
 st.markdown(FOOTER, unsafe_allow_html=True)
-
