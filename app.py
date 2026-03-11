@@ -1131,31 +1131,42 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
 # Excel Export (rich workbook)
 # =========================
 
-def build_excel_workbook(df: pd.DataFrame, debug_mode: bool = False, view: str = "Full") -> bytes:
+def build_excel_workbook(
+    df: pd.DataFrame,
+    debug_mode: bool = False,
+    view: str = "Full",
+    include_review: bool = False
+) -> bytes:
     export_df = df.copy()
 
-    # Add manual review columns for export
     if "Manual review" not in export_df.columns:
         export_df["Manual review"] = ""
-    if "Reviewer notes" not in export_df.columns:
-        export_df["Reviewer notes"] = ""
+    if "AL notes" not in export_df.columns:
+        export_df["AL notes"] = ""
 
-    # Build either full or condensed export table
     if view == "Condensed":
         export_df["DOI score"] = export_df.apply(compute_doi_score, axis=1)
+
         main_cols = ["Ref #", "Validation Result", "Score", "DOI score"]
-        if "Is Review" in export_df.columns:
-            main_cols.append("Is Review")
-        main_cols += ["Manual review", "Reviewer notes", "Notes", "Reference"]
+        if include_review:
+            main_cols += ["Is Review"]
+
+        main_cols += ["Manual review", "AL notes", "Notes", "Reference"]
         main = export_df[[c for c in main_cols if c in export_df.columns]].copy()
+
     else:
-        base_order = [
-            "Ref #", "Validation Result", "Score", "Is Review", "Review Source", "Review Notes",
-            "Manual review", "Reviewer notes",
+        base_order = ["Ref #", "Validation Result", "Score"]
+
+        if include_review:
+            base_order += ["Is Review", "Review Source", "Review Notes"]
+
+        base_order += [
+            "Manual review", "AL notes",
             "Reference", "Domain", "Domains",
             "Extracted DOI", "DOI Source", "Crossref DOI", "Crossref Journal", "Crossref Year",
             "PubMed ID", "PubMed Journal", "PubMed Year", "Notes"
         ]
+
         debug_order = ["doi_explicit_ok", "doi_derived_ok", "year_ok", "author_ok", "journal_ok"]
         desired = base_order + (debug_order if debug_mode else [])
         cols = [c for c in desired if c in export_df.columns]
@@ -1189,16 +1200,18 @@ def build_excel_workbook(df: pd.DataFrame, debug_mode: bool = False, view: str =
     else:
         dom_mat = pd.DataFrame()
 
-    issues = export_df[export_df["Validation Result"].isin(
-        ["⚠ Suspicious", "❌ possible falsification", "❌ Error"]
-    )].copy()
+    issues = export_df[
+        export_df["Validation Result"].isin(["⚠ Suspicious", "❌ possible falsification", "❌ Error"])
+    ].copy()
 
     if view == "Condensed":
         issues["DOI score"] = issues.apply(compute_doi_score, axis=1)
+
         issue_cols = ["Ref #", "Validation Result", "Score", "DOI score"]
-        if "Is Review" in issues.columns:
-            issue_cols.append("Is Review")
-        issue_cols += ["Manual review", "Reviewer notes", "Notes", "Reference"]
+        if include_review:
+            issue_cols += ["Is Review"]
+
+        issue_cols += ["Manual review", "AL notes", "Notes", "Reference"]
         issues = issues[[c for c in issue_cols if c in issues.columns]].copy()
     else:
         issues = issues[[c for c in main.columns if c in issues.columns]].copy()
@@ -1206,10 +1219,16 @@ def build_excel_workbook(df: pd.DataFrame, debug_mode: bool = False, view: str =
     out = io.BytesIO()
     with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
         writer.book.strings_to_urls = False
-
         workbook = writer.book
 
         fmt_header = workbook.add_format({"bold": True, "text_wrap": True, "valign": "top"})
+        fmt_review_header = workbook.add_format({
+            "bold": True,
+            "text_wrap": True,
+            "valign": "top",
+            "bg_color": "#d9eaf7",
+            "font_color": "#1f4e78"
+        })
         fmt_wrap = workbook.add_format({"text_wrap": True, "valign": "top"})
         fmt_real = workbook.add_format({"bg_color": "#d4edda", "font_color": "#155724"})
         fmt_web = workbook.add_format({"bg_color": "#e2e3e5", "font_color": "#383d41"})
@@ -1222,9 +1241,9 @@ def build_excel_workbook(df: pd.DataFrame, debug_mode: bool = False, view: str =
             for j, col in enumerate(dataframe.columns):
                 series = dataframe[col].astype(str)
                 max_len = max([len(col)] + [len(s) for s in series.tolist()])
-                if col in ("Reference", "Notes", "Reviewer notes"):
+                if col in ("Reference", "Notes", "AL notes", "Review Notes"):
                     cap = 90
-                elif col in ("Domains", "Journal", "PubMed Journal", "Crossref Journal"):
+                elif col in ("Domains", "Journal", "PubMed Journal", "Crossref Journal", "Review Source"):
                     cap = 38
                 else:
                     cap = 28
@@ -1237,11 +1256,15 @@ def build_excel_workbook(df: pd.DataFrame, debug_mode: bool = False, view: str =
                 nrows = max(len(dataframe), 200)
                 ws.data_validation(
                     1, col_idx, nrows, col_idx,
-                    {
-                        "validate": "list",
-                        "source": ["Yes", "No"]
-                    }
+                    {"validate": "list", "source": ["Yes", "No"]}
                 )
+
+        def style_headers(ws, dataframe):
+            for j, col in enumerate(dataframe.columns):
+                if col in ("Is Review", "Review Source", "Review Notes"):
+                    ws.write(0, j, col, fmt_review_header)
+                else:
+                    ws.write(0, j, col, fmt_header)
 
         def write_table(sheet_name, dataframe, wrap_cols=None):
             if dataframe.empty:
@@ -1252,16 +1275,12 @@ def build_excel_workbook(df: pd.DataFrame, debug_mode: bool = False, view: str =
             ws = writer.sheets[sheet_name]
             nrows, ncols = dataframe.shape
 
-            ws.add_table(0, 0, nrows, ncols - 1, {
-                "header_row": True,
-                "style": "Table Style Medium 9",
-                "columns": [{"header": h} for h in dataframe.columns]
-            })
-
             ws.set_row(0, None, fmt_header)
+            style_headers(ws, dataframe)
             ws.freeze_panes(1, 1)
             autosize(ws, dataframe, wrap_cols=wrap_cols)
             add_manual_review_dropdown(ws, dataframe)
+            ws.autofilter(0, 0, nrows, ncols - 1)
 
             if "Validation Result" in dataframe.columns:
                 col_idx = list(dataframe.columns).index("Validation Result")
@@ -1283,30 +1302,35 @@ def build_excel_workbook(df: pd.DataFrame, debug_mode: bool = False, view: str =
                     "type": "text", "criteria": "containing", "value": "Error", "format": fmt_err
                 })
 
-        st_counts = counts.copy()
-        st_counts.to_excel(writer, sheet_name="Summary", index=False, startrow=0)
+        counts.to_excel(writer, sheet_name="Summary", index=False, startrow=0)
         ws_sum = writer.sheets["Summary"]
         ws_sum.set_row(0, None, fmt_header)
         ws_sum.freeze_panes(1, 0)
-        ws_sum.autofilter(0, 0, len(st_counts), len(st_counts.columns) - 1)
-        autosize(ws_sum, st_counts)
+        ws_sum.autofilter(0, 0, len(counts), len(counts.columns) - 1)
 
-        startrow = len(st_counts) + 3
+        startrow = len(counts) + 3
         ws_sum.write_string(startrow, 0, "Top Domains (first 50):", fmt_header)
         if not top_domains.empty:
             top_domains.to_excel(writer, sheet_name="Summary", index=False, startrow=startrow + 1)
             ws_sum.autofilter(startrow + 1, 0, startrow + 1 + len(top_domains), len(top_domains.columns) - 1)
-            autosize(ws_sum, top_domains)
         else:
             ws_sum.write_string(startrow + 1, 0, "No domains found.")
 
-        wrap_cols = ["Reference", "Notes", "Reviewer notes", "Domains", "Journal", "PubMed Journal", "Crossref Journal"]
+        wrap_cols = [
+            "Reference", "Notes", "AL notes", "Review Notes",
+            "Domains", "Journal", "PubMed Journal", "Crossref Journal", "Review Source"
+        ]
         write_table("Results", main, wrap_cols=wrap_cols)
         write_table("Issues", issues, wrap_cols=wrap_cols)
-        write_table("Domains", dom_mat, wrap_cols=["Domain"])
+
+        if not dom_mat.empty:
+            dom_mat.to_excel(writer, sheet_name="Domains", index=False)
+            ws_dom = writer.sheets["Domains"]
+            ws_dom.set_row(0, None, fmt_header)
+            ws_dom.freeze_panes(1, 1)
+            ws_dom.autofilter(0, 0, len(dom_mat), len(dom_mat.columns) - 1)
 
     return out.getvalue()
-
 # =========================
 # Sanity check (format)
 # =========================
@@ -1677,22 +1701,40 @@ if st.button("Check References"):
             today = date.today().isoformat()
 
             full_xlsx_filename = f"{prefix}validated_references_full_{today}.xlsx"
-            full_xlsx_bytes = build_excel_workbook(df, debug_mode=debug_mode, view="Full")
+            condensed_xlsx_filename = f"{prefix}validated_references_condensed_{today}.xlsx"
+
+
+            today = date.today().isoformat()
+
+
+            full_xlsx_bytes = build_excel_workbook(
+                df,
+                debug_mode=debug_mode,
+                view="Full",
+                include_review=check_reviews
+            )
             st.download_button(
                 "Download full Excel workbook",
                 full_xlsx_bytes,
                 full_xlsx_filename,
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="download_full_xlsx"
             )
 
             condensed_xlsx_filename = f"{prefix}validated_references_condensed_{today}.xlsx"
-            condensed_xlsx_bytes = build_excel_workbook(df, debug_mode=False, view="Condensed")
+            condensed_xlsx_bytes = build_excel_workbook(
+                df,
+                debug_mode=False,
+                view="Condensed",
+                include_review=check_reviews
+            )
             st.download_button(
                 "Download condensed Excel workbook",
                 condensed_xlsx_bytes,
                 condensed_xlsx_filename,
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-)
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="download_condensed_xlsx"
+            )
            
             if used_fallback:
                 st.markdown("**Links:**")
