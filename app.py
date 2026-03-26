@@ -467,7 +467,7 @@ def split_references(text: str):
 # Scoring / Labels (tightened)
 # =========================
 
-def compute_weighted_(*, doi_explicit_ok, doi_derived_ok, author_ok, title_ok,
+def compute_weighted_score(*, doi_explicit_ok, doi_derived_ok, author_ok, title_ok,
                            year_ok, journal_ok, vol_ok, issue_ok, pages_ok, shape_ok) -> int:
     score = 0
     if doi_explicit_ok: score += 4
@@ -489,21 +489,6 @@ def score_result(
     title_ok=False, vol_ok=False, issue_ok=False, pages_ok=False,
     doi_invalid=False
 ):
-    """
-    Early fail (invalid DOI): never ✅ Real.
-
-    Hard-accept (explicit OR derived DOI):
-      - doi.org resolves AND
-      - (author_ok OR title_ok) AND
-      - any of {year_ok, journal_ok, vol_ok, issue_ok, pages_ok}
-
-    Hard-accept (no DOI):
-      - year_ok AND author_ok AND journal_ok
-
-    Strict mismatch guard:
-      - If (explicit OR derived) DOI is present/usable BUT BOTH author_ok and title_ok are False,
-        classify as ❌ possible falsification.
-    """
     weighted_score = compute_weighted_score(
         doi_explicit_ok=doi_explicit_ok, doi_derived_ok=doi_derived_ok,
         author_ok=author_ok, title_ok=title_ok, year_ok=year_ok, journal_ok=journal_ok,
@@ -523,14 +508,13 @@ def score_result(
         )
 
     if doi_explicit_ok or doi_derived_ok:
-    # derived/explicit DOI must have title match, not just author match
         id_match = title_ok
         biblio_one = any([year_ok, journal_ok, vol_ok, issue_ok, pages_ok])
         if id_match and biblio_one:
             return "✅ Real", "", weighted_score
-    
-        if (not doi_explicit_ok and not doi_derived_ok) and year_ok and author_ok and journal_ok:
-            return "✅ Real", "", weighted_score
+
+    if (not doi_explicit_ok and not doi_derived_ok) and year_ok and author_ok and journal_ok:
+        return "✅ Real", "", weighted_score
 
     reasons = []
     if not (doi_explicit_ok or doi_derived_ok): reasons.append("no DOI")
