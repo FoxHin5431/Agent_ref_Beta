@@ -524,13 +524,13 @@ def score_result(
 
     if doi_explicit_ok or doi_derived_ok:
     # derived/explicit DOI must have title match, not just author match
-    id_match = title_ok
-    biblio_one = any([year_ok, journal_ok, vol_ok, issue_ok, pages_ok])
-    if id_match and biblio_one:
-        return "✅ Real", "", weighted_score
-
-    if (not doi_explicit_ok and not doi_derived_ok) and year_ok and author_ok and journal_ok:
-        return "✅ Real", "", weighted_score
+        id_match = title_ok
+        biblio_one = any([year_ok, journal_ok, vol_ok, issue_ok, pages_ok])
+        if id_match and biblio_one:
+            return "✅ Real", "", weighted_score
+    
+        if (not doi_explicit_ok and not doi_derived_ok) and year_ok and author_ok and journal_ok:
+            return "✅ Real", "", weighted_score
 
     reasons = []
     if not (doi_explicit_ok or doi_derived_ok): reasons.append("no DOI")
