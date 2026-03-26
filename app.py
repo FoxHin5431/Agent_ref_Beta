@@ -193,16 +193,23 @@ def extract_journal(ref: str) -> str:
 def extract_title(ref: str) -> str:
     if not ref:
         return ""
+
+    # Quoted title first
     m_q = re.search(r"[\'‘’]\s*([^\'‘’]{2,300}?)\s*[\'‘’]", ref)
     if m_q:
         return m_q.group(1).strip()
 
-    m = re.search(r"(?:\(\d{4}[a-z]?\)|[, ]\s*\d{4}[a-z]?)\.\s+([^\.]{5,200})\.", ref)
+    # Allow either "(2016). Title." or "(2016) Title."
+    m = re.search(
+        r"(?:\(\d{4}[a-z]?\)|[, ]\s*\d{4}[a-z]?)\.?\s+([^\.]{5,300})\.",
+        ref
+    )
     if m:
         return m.group(1).strip()
 
+    # Broader fallback up to journal/pages/URL boundary
     m2 = re.search(
-        r"(?:\(\d{4}[a-z]?\)|[, ]\s*\d{4}[a-z]?)\.\s+(.+?)(?=(?:\.\s+[A-Z]|pp\.|Available at|https?://))",
+        r"(?:\(\d{4}[a-z]?\)|[, ]\s*\d{4}[a-z]?)\.?\s+(.+?)(?=(?:\.\s+[A-Z][A-Za-z&\-\s]+,|\.\s+pp\.|Available at|https?://|doi:|PMID:|PMCID:|$))",
         ref
     )
     return m2.group(1).strip() if m2 else ""
@@ -460,7 +467,7 @@ def split_references(text: str):
 # Scoring / Labels (tightened)
 # =========================
 
-def compute_weighted_score(*, doi_explicit_ok, doi_derived_ok, author_ok, title_ok,
+def compute_weighted_(*, doi_explicit_ok, doi_derived_ok, author_ok, title_ok,
                            year_ok, journal_ok, vol_ok, issue_ok, pages_ok, shape_ok) -> int:
     score = 0
     if doi_explicit_ok: score += 4
@@ -516,10 +523,11 @@ def score_result(
         )
 
     if doi_explicit_ok or doi_derived_ok:
-        id_match = (author_ok or title_ok)
-        biblio_one = any([year_ok, journal_ok, vol_ok, issue_ok, pages_ok])
-        if id_match and biblio_one:
-            return "✅ Real", "", weighted_score
+    # derived/explicit DOI must have title match, not just author match
+    id_match = title_ok
+    biblio_one = any([year_ok, journal_ok, vol_ok, issue_ok, pages_ok])
+    if id_match and biblio_one:
+        return "✅ Real", "", weighted_score
 
     if (not doi_explicit_ok and not doi_derived_ok) and year_ok and author_ok and journal_ok:
         return "✅ Real", "", weighted_score
