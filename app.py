@@ -1351,33 +1351,62 @@ st.caption("This is a test version for new functions")
 
 if "sid" not in st.session_state:
     st.session_state["sid"] = str(uuid.uuid4())
+with st.expander("How the result is decided"):
+    st.markdown("""
+A reference is **only** marked **✅ Real** when it passes a verification rule.  
+The score helps show how strong the match is, but the score alone does **not** make a reference real.
 
-with st.expander("How scoring works (click to view)"):
-    st.markdown(
-        """
-✅ Real only happens with a **Hard-accept**. The score never makes something Real.  
-Hard-accept: we can independently verify the reference (via DOI/Crossref/NCBI) and the key details match, so it is marked ✅ Real
+**✅ Real**
+- A DOI works and the key details match well enough, or
+- If there is no DOI, the **year**, **author**, and **journal** all match trusted records
 
-**Hard-accept with a DOI (explicit or derived)**
-- The DOI must resolve at doi.org.
-- **Author OR title** must match.
-- Plus **one** of: year / journal / volume / issue / pages.
+**⚠ Suspicious**
+- Some parts match, but the reference cannot be fully confirmed, or
+- It looks like a genuine reference, but there is not enough evidence to verify it properly
 
-**Hard-accept without a DOI**
-- From Crossref: **year + author + journal** must match.
+**❌ Possible falsification**
+- A DOI is present but does not work and the rest of the reference is weak, or
+- The DOI works but **both** the author and title do not match, or
+- The reference fails most checks and does not look reliable
+""")
 
-**DOI present but author AND title don’t match** → ❌ possible falsification  
-**DOI that doesn’t work anywhere** → never ✅ Real (mark ❌ possible falsification or ⚠ Suspicious)  
-**URL-only “journal” references** → try Crossref; if we can’t confirm it → ⚠ Suspicious  
-**PMC links** → if the PMCID checks out and key fields match → ✅ Real  
-**DOIs pulled from publisher URLs** → allowed, but must resolve at doi.org and match metadata before ✅ Real
-"""
-    )
+with st.expander("How the score is calculated"):
+    st.markdown("""
+The score is a simple guide that shows how many parts of the reference match trusted records.
+
+**Points**
+- **4 points** for a DOI given in the reference that works
+- **2 points** for a DOI found from other checks that works
+- **2 points** if the author matches
+- **2 points** if the title matches
+- **2 points** if the year matches
+- **1 point** if the journal matches
+- **1 point** if the volume matches
+- **1 point** if the issue matches
+- **1 point** if the pages match
+- **1 point** if the reference is in a believable format
+
+**Maximum score: 17**
+
+**How to read the score**
+- **0 to 3**: very weak match
+- **4 to 7**: limited match, usually needs caution
+- **8 to 11**: moderate match, may look plausible but still not confirmed
+- **12 to 17**: strong match
+
+**Important**
+A higher score means the reference looks stronger, but the score does **not** decide the final label on its own.
+
+A reference is only marked **✅ Real** if it passes the verification rules.  
+This means a high score can still be **⚠ Suspicious** or **❌ Possible falsification** if key checks fail.
+""")
+
+
 
 st.write(
     """
     Validates references via DOI / PubMed / Crossref and classifies results:
-    - ✅ Real → DOI (explicit/heuristic) verified with resolver + bibliographic match; OR Crossref-derived DOI verified at doi.org + match; OR PMCID/PMID verification
+    - ✅ Real → DOI verified with resolver + bibliographic match; OR Crossref-derived DOI verified at doi.org + match; OR PMCID/PMID verification
     - 📄 Web Source (trusted) / 📄 Web Source → website/URL
     - ⚠ Suspicious → partial mismatch or unverifiable but well-formed
     - ❌ possible falsification → fabricated pairing or failed checks
