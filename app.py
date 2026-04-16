@@ -11,18 +11,19 @@
 # - Strict mismatch guard: if DOI in play but BOTH author/title mismatch -> ❌ possible falsification
 # - Adds a numeric score (weights) and shows it in the UI table (3rd column)
 # - Adds an expandable "How scoring works" section in the UI
-# - Distinguish “journal-like with URL” from generic web sources; attempt Crossref before labeling
+# - Distinguish journal-like with URL from generic web sources; attempt Crossref before labeling
 # - PMCID support (verify via NCBI for PMC URLs / PMCID tokens)
 # - Crossref second-pass search using fielded params (title/author/journal)
-# - NEW: DOI-from-URL inference registry (Nature, eLife, ScienceDirect PIIs — guarded by doi.org resolution)
+# - DOI-from-URL inference registry (Nature, eLife, ScienceDirect PIIs — guarded by doi.org resolution)
 # - API etiquette + retry/backoff
 # - Clickable DOI/PubMed links via st.data_editor LinkColumn (with fallback)
-# - NEW: derived DOI can hard-accept (✅ Real) ONLY if doi.org resolves AND metadata gates pass
+# - Derived DOI can hard-accept (✅ Real) ONLY if doi.org resolves AND metadata gates pass
+# - NEW: leading bullets / list markers stripped before parsing
+# - NEW: organisational/report/dataset web references with URLs routed to manual review rather than false
 
 import streamlit as st
 import pandas as pd
 import re
-import csv
 import urllib.parse
 import asyncio
 import httpx
@@ -53,7 +54,24 @@ TRUSTED_BASE_DOMAINS = {
     "openstax.org", "open.edu", "coursera.org", "edx.org",
     # Known research resources
     "ukbiobank.ac.uk",
+    # Additional likely trusted org/report sources
+    "unaids.org", "saude.gov.br", "bvsms.saude.gov.br",
 }
+
+ORG_SOURCE_HINTS = {
+    "world health organization", "who", "unaids", "ministry", "department",
+    "government", "gov", "national", "programme", "program", "report",
+    "reports", "repository", "data repository", "dataset", "data",
+    "fact sheet", "statistics", "observatory", "health observatory",
+    "agency", "organisation", "organization", "office for", "nhs", "ukhsa"
+}
+
+MANUAL_REVIEW_LABEL = "🟡 Manual review – web source / report / dataset"
+
+LEADING_LIST_MARKER_RE = re.compile(
+    r"^\s*(?:[\u2022\u2023\u25E6\u2043\u2219•◦▪▸►●*\-–—]+|\d+[.)\]]|[A-Za-z][.)\]])\s*",
+    flags=re.UNICODE
+)
 
 JOURNAL_NORMALIZATION = {
     "sleep med rev": "sleep medicine reviews",
@@ -134,11 +152,33 @@ def sanitize_prefix(s: str) -> str:
     s = re.sub(r"-{2,}", "-", s).strip("-")
     return (s + "_") if s else ""
 
+def strip_leading_list_marker(ref: str) -> str:
+    if not ref:
+        return ref
+    return LEADING_LIST_MARKER_RE.sub("", ref).strip()
+
+def normalise_broken_url_spacing(text: str) -> str:
+    if not text:
+        return text
+
+    def _fix_url(match):
+        url = match.group(0)
+        url = re.sub(r"\s+", "", url)
+        return url
+
+    text = re.sub(r"https?://[^\s<>\]]+(?:\s+[^\s<>\]]+)*", _fix_url, text, flags=re.I)
+    text = re.sub(r"(https?://\S*?)-\s+(\S+)", r"\1-\2", text)
+    return text
+
 def clean_ref(ref: str) -> str:
-    s = ref
+    s = ref or ""
+    s = strip_leading_list_marker(s)
+    s = normalise_broken_url_spacing(s)
+    s = s.replace("\u00a0", " ")
+
     s = re.sub(r"\[(?:Online|online)\]", "", s, flags=re.I)
     s = re.sub(r"\bAvailable at\b.*?$", "", s, flags=re.I)
-    s = re.sub(r"\bAccessed\b.*?$", "", s, flags=re.I)
+    s = re.sub(r"\bAccessed(?: date)?\b.*?$", "", s, flags=re.I)
     s = " ".join(s.split())
     return s.strip(" .")
 
@@ -185,7 +225,7 @@ def extract_journal(ref: str) -> str:
             "journal", "review", "bulletin", "research", "studies",
             "letters", "proceedings", "transactions", "reports", "pediatrics",
             "neuroscience", "medicine", "science", "sleep", "counseling", "counselling", "education",
-            "immunogenetics", "nature reviews"
+            "immunogenetics", "nature reviews", "lancet"
         ]):
             return normalize_journal_name(part.strip(" ;:()"))
     return ""
@@ -194,12 +234,10 @@ def extract_title(ref: str) -> str:
     if not ref:
         return ""
 
-    # Quoted title first
     m_q = re.search(r"[\'‘’]\s*([^\'‘’]{2,300}?)\s*[\'‘’]", ref)
     if m_q:
         return m_q.group(1).strip()
 
-    # Allow either "(2016). Title." or "(2016) Title."
     m = re.search(
         r"(?:\(\d{4}[a-z]?\)|[, ]\s*\d{4}[a-z]?)\.?\s+([^\.]{5,300})\.",
         ref
@@ -207,7 +245,6 @@ def extract_title(ref: str) -> str:
     if m:
         return m.group(1).strip()
 
-    # Broader fallback up to journal/pages/URL boundary
     m2 = re.search(
         r"(?:\(\d{4}[a-z]?\)|[, ]\s*\d{4}[a-z]?)\.?\s+(.+?)(?=(?:\.\s+[A-Z][A-Za-z&\-\s]+,|\.\s+pp\.|Available at|https?://|doi:|PMID:|PMCID:|$))",
         ref
@@ -238,19 +275,32 @@ def extract_pmcid(ref: str):
         return m.group(1).upper()
     return ""
 
-def extract_domains(ref: str):
-    ref = re.sub(r"\bview-source:\s*", "", ref, flags=re.I)
-    urls = re.findall(r"https?://([A-Za-z0-9\.\-]+)", ref)
-    seen, out = set(), []
-    for d in urls:
-        d = d.lower()
-        if d not in seen:
-            seen.add(d)
-            out.append(d)
+def extract_urls(ref: str):
+    if not ref:
+        return []
+    s = normalise_broken_url_spacing(ref)
+    urls = re.findall(r"https?://[^\s<>\]]+", s, flags=re.I)
+    out = []
+    seen = set()
+    for u in urls:
+        u = u.rstrip(").,;")
+        if u not in seen:
+            seen.add(u)
+            out.append(u)
     return out
 
-def extract_urls(ref: str):
-    return re.findall(r"https?://[A-Za-z0-9\.\-_/:%#?=&]+", ref)
+def extract_domains(ref: str):
+    urls = extract_urls(ref)
+    seen, out = set(), []
+    for u in urls:
+        try:
+            d = urllib.parse.urlparse(u).netloc.lower().replace("www.", "")
+            if d and d not in seen:
+                seen.add(d)
+                out.append(d)
+        except Exception:
+            pass
+    return out
 
 def domain_is_trusted(domain: str) -> bool:
     domain = (domain or "").lower()
@@ -275,16 +325,36 @@ def has_bibliographic_shape(ref: str) -> bool:
         return False
     pages = re.search(r"\bpp?\.\s*\d+", ref, flags=re.I)
     vol_issue = re.search(r"\b\d+\s*\(\d+\)", ref)
-    return bool(pages or vol_issue)
+    page_range = re.search(r"\b\d+\s*[-–]\s*\d+\b", ref)
+    return bool(pages or vol_issue or page_range)
 
 def looks_scholarly_like(ref_clean: str) -> bool:
     yr = bool(extract_year(ref_clean))
     jnl = bool(extract_journal(ref_clean))
     shape = has_bibliographic_shape(ref_clean)
     vol_issue = re.search(r"\b\d{1,4}\s*\(\s*[A-Za-z0-9\-]+\s*\)", ref_clean) is not None
-    pages = re.search(r"\bpp?\.\s*\d+", ref_clean, flags=re.I) is not None
+    pages = re.search(r"\bpp?\.\s*\d+", ref_clean, flags=re.I) is not None or re.search(r"\b\d+\s*[-–]\s*\d+\b", ref_clean) is not None
     title_len = len(extract_title(ref_clean) or "")
     return yr and (jnl or shape or vol_issue or pages or title_len >= 25)
+
+def looks_like_org_web_source(ref: str, primary_domain: str = "") -> bool:
+    ref_l = (ref or "").lower()
+    hint_hit = any(h in ref_l for h in ORG_SOURCE_HINTS)
+    trusted_hit = bool(primary_domain and domain_is_trusted(primary_domain))
+
+    not_journal_like = not looks_scholarly_like(clean_ref(ref))
+    no_doiish = not bool(extract_doi(ref))
+    no_pmidish = not bool(re.search(r"\bPMID:\s*\d+\b", ref, flags=re.I))
+    no_pmcidish = not bool(extract_pmcid(ref))
+
+    return bool(
+        extract_urls(ref)
+        and (hint_hit or trusted_hit)
+        and not_journal_like
+        and no_doiish
+        and no_pmidish
+        and no_pmcidish
+    )
 
 def strip_accents(s: str) -> str:
     if not s:
@@ -310,9 +380,13 @@ def extract_vol_issue_pages(ref: str):
     m_vi = re.search(r"\b(\d{1,4})\s*\(\s*([A-Za-z0-9\-]+)\s*\)", s)
     vol = m_vi.group(1) if m_vi else ""
     issue = m_vi.group(2) if m_vi else ""
+
     m_pp = re.search(r"\bpp?\.\s*([0-9]+(?:\s*[-–]\s*[0-9]+)?)", s, flags=re.I)
     if not m_pp:
         m_pp = re.search(r"\b\d{1,4}\s*\(\s*[A-Za-z0-9\-]+\s*\)\s*[,:]?\s*([0-9]+(?:\s*[-–]\s*[0-9]+)?)", s)
+    if not m_pp:
+        m_pp = re.search(r"\b([0-9]+(?:\s*[-–]\s*[0-9]+))\b", s)
+
     pages = m_pp.group(1) if m_pp else ""
 
     def parse_pages(pg: str):
@@ -330,8 +404,10 @@ def pages_match(ref_start: str, ref_end: str, cr_pages: str) -> bool:
     cr_start, cr_end = "", ""
     if cr_pages:
         parts = re.split(r"[-–]\s*", str(cr_pages))
-        if len(parts) >= 1: cr_start = parts[0].strip()
-        if len(parts) >= 2: cr_end = parts[1].strip()
+        if len(parts) >= 1:
+            cr_start = parts[0].strip()
+        if len(parts) >= 2:
+            cr_end = parts[1].strip()
 
     if not ref_start and not ref_end:
         return False
@@ -354,7 +430,7 @@ def pages_match(ref_start: str, ref_end: str, cr_pages: str) -> bool:
         if ref_start and cr_start and ref_start == cr_start:
             return True
         rng = f"{ref_start}-{ref_end}".strip("-")
-        return rng and cr_pages and rng in str(cr_pages)
+        return bool(rng and cr_pages and rng in str(cr_pages))
 
 # --- DOI-from-URL inference registry (guarded by doi.org HEAD) ---
 
@@ -395,13 +471,14 @@ def split_references(text: str):
     if not text:
         return []
 
-    lines = [ln.strip() for ln in re.sub(r"\r\n?", "\n", text).strip().split("\n")]
+    raw_lines = re.sub(r"\r\n?", "\n", text).strip().split("\n")
+    lines = [normalise_broken_url_spacing(ln.strip()) for ln in raw_lines]
 
     year_any = re.compile(r"\b(?:1[89]\d{2}|20\d{2})[a-z]?\b", re.I)
     noise_start = re.compile(r"^(Available at|Accessed|\[Online\]|Online\]|Online\.|\[Accessed)", re.I)
-    url_line    = re.compile(r"^(https?://|doi\.org/|view-source:https?://)", re.I)
+    url_line = re.compile(r"^(https?://|doi\.org/|view-source:https?://)", re.I)
 
-    author_or_org_comma = re.compile(r"^[A-ZÀ-ÖØ-Þ][^,]{0,120},", re.UNICODE)
+    author_or_org_comma = re.compile(r"^[A-ZÀ-ÖØ-Þ][^,]{0,160},", re.UNICODE)
     entity_paren_year = re.compile(
         r"^[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ0-9&'`\-()./ ]+\(\s*(?:1[89]\d{2}|20\d{2})[a-z]?\s*\)",
         re.UNICODE
@@ -410,17 +487,17 @@ def split_references(text: str):
         r"^[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ&'`\-()./ ]+,\s*(?:1[89]\d{2}|20\d{2})[a-z]?\b",
         re.UNICODE
     )
-    leading_num = re.compile(r"^\s*\d+[\)\].]\s+")
+
+    def prep_line(ln: str) -> str:
+        return strip_leading_list_marker(ln)
 
     def looks_like_start(ln: str) -> bool:
         if not ln:
             return False
-        if noise_start.match(ln) or url_line.match(ln):
+        check = prep_line(ln)
+        if noise_start.match(check) or url_line.match(check):
             return False
-        check = ln
-        if leading_num.match(ln):
-            check = leading_num.sub("", ln, count=1).lstrip()
-        if (author_or_org_comma.match(check) and year_any.search(check)):
+        if author_or_org_comma.match(check) and year_any.search(check):
             return True
         if entity_paren_year.match(check):
             return True
@@ -440,7 +517,7 @@ def split_references(text: str):
         if looks_like_start(ln):
             if cur:
                 refs.append(" ".join(cur).strip())
-            cur = [ln]
+            cur = [prep_line(ln)]
         else:
             cur.append(ln)
 
@@ -454,8 +531,8 @@ def split_references(text: str):
         if len(starts) >= 2:
             chunks = []
             for idx, start in enumerate(starts):
-                end = starts[idx+1] if idx+1 < len(starts) else len(lines)
-                chunk = " ".join(lines[start:end]).strip()
+                end = starts[idx + 1] if idx + 1 < len(starts) else len(lines)
+                chunk = " ".join(prep_line(x) for x in lines[start:end]).strip()
                 if chunk:
                     chunks.append(" ".join(chunk.split()))
             if chunks:
@@ -464,7 +541,7 @@ def split_references(text: str):
     return refs
 
 # =========================
-# Scoring / Labels (tightened)
+# Scoring / Labels
 # =========================
 
 def compute_weighted_score(*, doi_explicit_ok, doi_derived_ok, author_ok, title_ok,
@@ -487,13 +564,16 @@ def score_result(
     doi_explicit_ok=False, doi_derived_ok=False,
     ref="", shape_ok=False, has_url=False, had_crossref_candidate=False,
     title_ok=False, vol_ok=False, issue_ok=False, pages_ok=False,
-    doi_invalid=False
+    doi_invalid=False, manual_review_web=False
 ):
     weighted_score = compute_weighted_score(
         doi_explicit_ok=doi_explicit_ok, doi_derived_ok=doi_derived_ok,
         author_ok=author_ok, title_ok=title_ok, year_ok=year_ok, journal_ok=journal_ok,
         vol_ok=vol_ok, issue_ok=issue_ok, pages_ok=pages_ok, shape_ok=shape_ok
     )
+
+    if manual_review_web:
+        return MANUAL_REVIEW_LABEL, "organisational/report/dataset-style web source with URL", weighted_score
 
     if doi_invalid:
         minimally_ok = any([year_ok, author_ok, title_ok, journal_ok, vol_ok, issue_ok, pages_ok]) or shape_ok
@@ -518,13 +598,13 @@ def score_result(
 
     reasons = []
     if not (doi_explicit_ok or doi_derived_ok): reasons.append("no DOI")
-    if not author_ok:   reasons.append("author mismatch")
-    if not title_ok:    reasons.append("title mismatch")
-    if not year_ok:     reasons.append("year mismatch")
-    if not journal_ok:  reasons.append("journal mismatch")
-    if not vol_ok:      reasons.append("volume mismatch")
-    if not issue_ok:    reasons.append("issue mismatch")
-    if not pages_ok:    reasons.append("pages mismatch")
+    if not author_ok: reasons.append("author mismatch")
+    if not title_ok: reasons.append("title mismatch")
+    if not year_ok: reasons.append("year mismatch")
+    if not journal_ok: reasons.append("journal mismatch")
+    if not vol_ok: reasons.append("volume mismatch")
+    if not issue_ok: reasons.append("issue mismatch")
+    if not pages_ok: reasons.append("pages mismatch")
 
     if weighted_score >= 4:
         return "⚠ Suspicious", ", ".join(reasons), weighted_score
@@ -620,7 +700,7 @@ async def check_doi_org_head(client, doi_val: str) -> bool:
 
 def choose_best_crossref_item(ref, items, first_author, year, ref_journal, title):
     def get_year(it):
-        for path in (("issued","date-parts"), ("published-print","date-parts"), ("created","date-parts")):
+        for path in (("issued", "date-parts"), ("published-print", "date-parts"), ("created", "date-parts")):
             obj = it
             for key in path:
                 obj = obj.get(key, {})
@@ -655,17 +735,17 @@ def choose_best_crossref_item(ref, items, first_author, year, ref_journal, title
 
     for it in items[:5]:
         it_title = get_title(it)
-        it_year  = get_year(it)
-        it_jnl   = (it.get("container-title") or [""])[0]
-        fams     = [a.get("family","") for a in it.get("author", [])]
+        it_year = get_year(it)
+        it_jnl = (it.get("container-title") or [""])[0]
+        fams = [a.get("family", "") for a in it.get("author", [])]
 
         title_sim = similar(title, it_title) if (title and it_title) else 0.0
-        year_ok   = bool(y_ref is not None and it_year is not None and abs(it_year - y_ref) <= tol)
-        auth_ok   = bool(first_author and any(surname_match(first_author, f) for f in fams))
-        jnl_ok    = journals_match(ref_journal, it_jnl)
+        year_ok = bool(y_ref is not None and it_year is not None and abs(it_year - y_ref) <= tol)
+        auth_ok = bool(first_author and any(surname_match(first_author, f) for f in fams))
+        jnl_ok = journals_match(ref_journal, it_jnl)
 
         passes = (title_sim >= title_threshold and year_ok) or (auth_ok and year_ok)
-        score  = (title_sim * 0.7) + (0.2 if auth_ok else 0) + (0.1 if jnl_ok else 0)
+        score = (title_sim * 0.7) + (0.2 if auth_ok else 0) + (0.1 if jnl_ok else 0)
 
         if passes and score > best_score:
             best, best_score = it, score
@@ -682,19 +762,23 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
     review_source = ""
     review_notes = ""
 
+    ref = strip_leading_list_marker(ref or "")
+    ref = normalise_broken_url_spacing(ref)
+
     domains = extract_domains(ref)
     urls = extract_urls(ref)
     primary_domain = domains[0] if domains else ""
     domains_joined = ", ".join(domains)
 
     trusted_web = bool(primary_domain and domain_is_trusted(primary_domain))
+    manual_review_web = looks_like_org_web_source(ref, primary_domain=primary_domain)
 
     ref_clean = clean_ref(ref)
     first_author = extract_first_author(ref_clean)
     year = extract_year(ref_clean)
     ref_journal = extract_journal(ref_clean).lower()
     title = extract_title(ref_clean)
-    doi_val = extract_doi(ref)  # already stripped
+    doi_val = extract_doi(ref)
     pmid_match = re.search(r"\bPMID:\s*(\d+)\b", ref, flags=re.I)
     pmcid_val = extract_pmcid(ref)
     shape_ok = has_bibliographic_shape(ref_clean)
@@ -711,10 +795,9 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
     doi_source = ""
     had_crossref_candidate = False
     doi_explicit_ok = False
-    doi_derived_ok  = False
+    doi_derived_ok = False
     doi_invalid = False
 
-    # DOI-from-URL inference BEFORE early web-source short-circuit
     if not doi_val and urls:
         for u in urls:
             cand = infer_doi_from_url_candidate(u)
@@ -725,7 +808,34 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
 
     scholarly_like = looks_scholarly_like(ref_clean)
 
-    # Early short-circuit for non-scholarly web sources
+    if manual_review_web:
+        return {
+            "Reference": ref,
+            "Extracted DOI": "",
+            "DOI Source": "",
+            "Crossref DOI": "",
+            "Crossref Journal": "",
+            "Crossref Year": "",
+            "PubMed ID": "",
+            "PubMed Journal": "",
+            "PubMed Year": "",
+            "Score": 0,
+            "doi_ok": False,
+            "year_ok": bool(year),
+            "author_ok": bool(first_author),
+            "journal_ok": False,
+            "Validation Result": MANUAL_REVIEW_LABEL,
+            "Raw Result": MANUAL_REVIEW_LABEL,
+            "Notes": "URL detected; organisational/report/dataset-style source; manual review recommended",
+            "Domain": primary_domain,
+            "Domains": domains_joined,
+            "doi_explicit_ok": False,
+            "doi_derived_ok": False,
+            "Is Review": False,
+            "Review Source": "",
+            "Review Notes": "",
+        }
+
     if not (doi_val or pmid_match or pmcid_val) and primary_domain and not scholarly_like:
         label = "📄 Web Source (trusted)" if trusted_web else "📄 Web Source"
         return {
@@ -778,15 +888,13 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
 
             doi_ok = (resp.status_code == 200)
 
-            # Review heuristics (does not affect doi_ok)
-            if check_reviews: 
+            if check_reviews:
                 if not is_review:
-                    if check_reviews and (infer_review_from_title(it_title) or infer_review_from_title(title)):
+                    if infer_review_from_title(it_title) or infer_review_from_title(title):
                         is_review = True
                         review_source = "Crossref/title heuristic"
                         review_notes = "title pattern matched"
 
-                # PubMed pubtypes via DOI (extra signal)
                 if not is_review:
                     pmid_via_doi = ""
                     try:
@@ -812,18 +920,18 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
             if item:
                 if year and crossref_year.isdigit():
                     y_ref, y_cr = int(year), int(crossref_year)
-                    tol = 1
+                    tol = 1 if y_ref <= 1990 else 2
                     year_ok = abs(y_cr - y_ref) <= tol
 
                 author_ok = bool(first_author and any(surname_match(first_author, fam) for fam in meta_authors))
                 journal_ok = journals_match(ref_journal, crossref_journal)
                 title_sim = title_similarity(title, it_title)
-                title_ok  = bool(title_sim >= (0.78 if (year and year.isdigit() and int(year) <= 1990) else 0.75))
+                title_ok = bool(title_sim >= (0.78 if (year and year.isdigit() and int(year) <= 1990) else 0.75))
 
-                cr_vol  = str(item.get("volume") or "").strip()
+                cr_vol = str(item.get("volume") or "").strip()
                 cr_issue = str(item.get("issue") or (item.get("journal-issue", {}) or {}).get("issue") or "").strip()
                 cr_pages = str(item.get("page") or "").strip()
-                vol_ok   = bool(ref_vol and cr_vol and ref_vol == cr_vol)
+                vol_ok = bool(ref_vol and cr_vol and ref_vol == cr_vol)
                 issue_ok = bool(ref_issue and cr_issue and ref_issue == cr_issue)
                 pages_ok = pages_match(ref_pstart, ref_pend, cr_pages)
 
@@ -841,7 +949,7 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
                 m_year = re.search(r"\b(1[89]\d{2}|20\d{2})\b", str(pubmed_year))
                 year_ok = bool(year and m_year and year == m_year.group(1))
 
-                authors_list = [a.get("name","") for a in summary.get("authors", [])]
+                authors_list = [a.get("name", "") for a in summary.get("authors", [])]
                 surname = (first_author.split()[0].lower() if first_author else "")
                 author_ok = bool(
                     surname and any(
@@ -861,6 +969,7 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
                         review_notes = rnote + (f"; pubtypes={pubtypes[:6]}" if pubtypes else "")
 
         elif pmcid_val:
+            pmid_from_pmc = ""
             resp = await fetch_pmc(client, pmcid_val)
             if resp.status_code == 200:
                 data = resp.json().get("result", {})
@@ -891,14 +1000,14 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
                     )
                 )
                 journal_ok = journals_match(ref_journal, pubmed_journal)
-                pubmed_id = pmcid_val  # store PMCID for visibility
+                pubmed_id = pmcid_val
 
-                pmid_from_pmc = ""
                 articleids = summary.get("articleids") or []
                 for a in articleids:
-                    if isinstance(a, dict) and str(a.get("idtype","")).lower() == "pmid":
-                        pmid_from_pmc = str(a.get("value","")).strip()
+                    if isinstance(a, dict) and str(a.get("idtype", "")).lower() == "pmid":
+                        pmid_from_pmc = str(a.get("value", "")).strip()
                         break
+
             if check_reviews:
                 if pmid_from_pmc:
                     resp_xml = await fetch_pubmed_efetch_xml(client, pmid_from_pmc)
@@ -915,7 +1024,6 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
                         review_notes = "title pattern matched"
 
         else:
-            # Bibliographic search (first pass)
             resp = await fetch_crossref_bib(client, ref_clean)
             match_reason = "no query made"
             first_pass_item = None
@@ -934,13 +1042,12 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
                         meta_authors = [a.get("family", "") for a in item.get("author", [])]
                         it_title = (item.get("title") or [""])[0]
 
-                        if not is_review:
+                        if check_reviews and (not is_review):
                             if infer_review_from_title(it_title) or infer_review_from_title(title):
                                 is_review = True
                                 review_source = "Crossref/title heuristic"
                                 review_notes = "title pattern matched"
 
-                        # NEW: derived DOI must resolve at doi.org to count as "derived ok"
                         doi_org_ok = False
                         if crossref_doi:
                             doi_org_ok = await check_doi_org_head(client, crossref_doi)
@@ -955,12 +1062,12 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
                         author_ok = bool(first_author and any(surname_match(first_author, fam) for fam in meta_authors))
                         journal_ok = journals_match(ref_journal, crossref_journal)
                         title_sim = title_similarity(title, it_title)
-                        title_ok  = bool(title_sim >= (0.78 if (year and year.isdigit() and int(year) <= 1990) else 0.75))
+                        title_ok = bool(title_sim >= (0.78 if (year and year.isdigit() and int(year) <= 1990) else 0.75))
 
-                        cr_vol  = str(item.get("volume") or "").strip()
+                        cr_vol = str(item.get("volume") or "").strip()
                         cr_issue = str(item.get("issue") or (item.get("journal-issue", {}) or {}).get("issue") or "").strip()
                         cr_pages = str(item.get("page") or "").strip()
-                        vol_ok   = bool(ref_vol and cr_vol and ref_vol == cr_vol)
+                        vol_ok = bool(ref_vol and cr_vol and ref_vol == cr_vol)
                         issue_ok = bool(ref_issue and cr_issue and ref_issue == cr_issue)
                         pages_ok = pages_match(ref_pstart, ref_pend, cr_pages)
 
@@ -972,7 +1079,6 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
             else:
                 match_reason = f"Crossref HTTP {resp.status_code}"
 
-            # second pass (fielded) if first pass failed to lock on
             if not first_pass_item:
                 resp2 = await fetch_crossref_fielded(
                     client,
@@ -999,7 +1105,6 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
                                 review_source = "Crossref/title heuristic"
                                 review_notes = "title pattern matched"
 
-                            # NEW: derived DOI must resolve at doi.org
                             doi_org_ok = False
                             if crossref_doi:
                                 doi_org_ok = await check_doi_org_head(client, crossref_doi)
@@ -1014,12 +1119,12 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
                             author_ok = bool(first_author and any(surname_match(first_author, fam) for fam in meta_authors))
                             journal_ok = journals_match(ref_journal, crossref_journal)
                             title_sim = title_similarity(title, it_title)
-                            title_ok  = bool(title_sim >= (0.78 if (year and year.isdigit() and int(year) <= 1990) else 0.75))
+                            title_ok = bool(title_sim >= (0.78 if (year and year.isdigit() and int(year) <= 1990) else 0.75))
 
-                            cr_vol  = str(item.get("volume") or "").strip()
+                            cr_vol = str(item.get("volume") or "").strip()
                             cr_issue = str(item.get("issue") or (item.get("journal-issue", {}) or {}).get("issue") or "").strip()
                             cr_pages = str(item.get("page") or "").strip()
-                            vol_ok   = bool(ref_vol and cr_vol and ref_vol == cr_vol)
+                            vol_ok = bool(ref_vol and cr_vol and ref_vol == cr_vol)
                             issue_ok = bool(ref_issue and cr_issue and ref_issue == cr_issue)
                             pages_ok = pages_match(ref_pstart, ref_pend, cr_pages)
 
@@ -1053,7 +1158,6 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
             "doi_derived_ok": doi_derived_ok,
         }
 
-    # --- scoring ---
     result, reason, weighted_score = score_result(
         year_ok, author_ok, journal_ok,
         doi_explicit_ok=doi_explicit_ok,
@@ -1063,8 +1167,11 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
         has_url=bool(primary_domain),
         had_crossref_candidate=had_crossref_candidate,
         title_ok=title_ok,
-        vol_ok=vol_ok, issue_ok=issue_ok, pages_ok=pages_ok,
-        doi_invalid=doi_invalid
+        vol_ok=vol_ok,
+        issue_ok=issue_ok,
+        pages_ok=pages_ok,
+        doi_invalid=doi_invalid,
+        manual_review_web=manual_review_web
     )
 
     if doi_invalid:
@@ -1088,7 +1195,7 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
     if (not doi_val and not pmid_match and not primary_domain) and result in {"⚠ Suspicious", "❌ possible falsification"}:
         reason = (reason + ("; " if reason else "") + "no DOI/PMID/URL present; manual review recommended").strip("; ")
 
-    if trusted_web and primary_domain and "Web Source" in result:
+    if trusted_web and primary_domain and ("Web Source" in result or "Manual review" in result):
         reason = (reason + ("; " if reason else "") + "trusted domain").strip("; ")
 
     return {
@@ -1116,7 +1223,6 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
         "Is Review": bool(is_review) if check_reviews else False,
         "Review Source": review_source if check_reviews else "",
         "Review Notes": review_notes if check_reviews else "",
-
     }
 
 # =========================
@@ -1193,7 +1299,12 @@ def build_excel_workbook(
         dom_mat = pd.DataFrame()
 
     issues = export_df[
-        export_df["Validation Result"].isin(["⚠ Suspicious", "❌ possible falsification", "❌ Error"])
+        export_df["Validation Result"].isin([
+            "⚠ Suspicious",
+            "❌ possible falsification",
+            "❌ Error",
+            MANUAL_REVIEW_LABEL
+        ])
     ].copy()
 
     if view == "Condensed":
@@ -1224,6 +1335,7 @@ def build_excel_workbook(
         fmt_wrap = workbook.add_format({"text_wrap": True, "valign": "top"})
         fmt_real = workbook.add_format({"bg_color": "#d4edda", "font_color": "#155724"})
         fmt_web = workbook.add_format({"bg_color": "#e2e3e5", "font_color": "#383d41"})
+        fmt_manual = workbook.add_format({"bg_color": "#fff4cc", "font_color": "#7a5c00"})
         fmt_susp = workbook.add_format({"bg_color": "#fff3cd", "font_color": "#856404"})
         fmt_ai = workbook.add_format({"bg_color": "#f8d7da", "font_color": "#721c24"})
         fmt_err = workbook.add_format({"bg_color": "#fde2e1", "font_color": "#7a1b17"})
@@ -1232,7 +1344,7 @@ def build_excel_workbook(
             wrap_cols = wrap_cols or []
             for j, col in enumerate(dataframe.columns):
                 series = dataframe[col].astype(str)
-                max_len = max([len(col)] + [len(s) for s in series.tolist()])
+                max_len = max([len(col)] + [len(s) for s in series.tolist()]) if len(series) else len(col)
                 if col in ("Reference", "Notes", "AL notes", "Review Notes"):
                     cap = 90
                 elif col in ("Domains", "Journal", "PubMed Journal", "Crossref Journal", "Review Source"):
@@ -1282,6 +1394,9 @@ def build_excel_workbook(
                     "type": "text", "criteria": "containing", "value": "Real", "format": fmt_real
                 })
                 ws.conditional_format(first, col_idx, last, col_idx, {
+                    "type": "text", "criteria": "containing", "value": "Manual review", "format": fmt_manual
+                })
+                ws.conditional_format(first, col_idx, last, col_idx, {
                     "type": "text", "criteria": "containing", "value": "Web Source", "format": fmt_web
                 })
                 ws.conditional_format(first, col_idx, last, col_idx, {
@@ -1323,6 +1438,7 @@ def build_excel_workbook(
             ws_dom.autofilter(0, 0, len(dom_mat), len(dom_mat.columns) - 1)
 
     return out.getvalue()
+
 # =========================
 # Sanity check (format)
 # =========================
@@ -1356,7 +1472,8 @@ st.write(
     """
     Validates references via DOI / PubMed / Crossref and classifies results:
     - ✅ Real → DOI verified with resolver + bibliographic match; OR Crossref-derived DOI verified at doi.org + match; OR PMCID/PMID verification
-    - 📄 Web Source (trusted) / 📄 Web Source → website/URL
+    - 🟡 Manual review – web source / report / dataset → organisational or dataset/report-style web source with URL
+    - 📄 Web Source (trusted) / 📄 Web Source → general website/URL
     - ⚠ Suspicious → partial mismatch or unverifiable but well-formed
     - ❌ possible falsification → fabricated pairing or failed checks
     """
@@ -1370,6 +1487,11 @@ The score helps show how strong the match is, but the score alone does **not** m
 **✅ Real**
 - A DOI works and the key details match well enough, or
 - If there is no DOI, the **year**, **author**, and **journal** all match trusted records
+
+**🟡 Manual review – web source / report / dataset**
+- The reference looks like an organisational source, fact sheet, report, repository, or dataset
+- It contains a URL, but it is not a standard journal-style reference
+- These are not marked false automatically and should be checked manually
 
 **⚠ Suspicious**
 - Some parts match, but the reference cannot be fully confirmed, or
@@ -1412,9 +1534,6 @@ A reference is only marked **✅ Real** if it passes the verification rules.
 This means a high score can still be **⚠ Suspicious** or **❌ Possible falsification** if key checks fail.
 """)
 
-
-
-
 st.markdown(
     """
     <style>
@@ -1426,22 +1545,18 @@ st.markdown(
 
 debug_mode = st.checkbox("Show debug details", value=False)
 
-# NEW: review checking toggle (off by default)
 check_reviews = st.checkbox(
     "Detect reviews (slower)",
     value=False,
     help="If enabled, Agent Ref will try to detect reviews using PubMed publication types and title heuristics."
 )
 
-# NEW: table view selector
 table_view = st.selectbox(
     "Table view",
     ["Full", "Condensed"],
     index=0,
     help="Condensed view shows only key columns for quick marking."
 )
-
-
 
 if debug_mode:
     st.info("Debug shows extra check columns and flags for explicit/derived/heuristic DOI, plus which checks passed.")
@@ -1464,7 +1579,6 @@ with input_col:
 with clear_col:
     st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
     st.button("Clear box", on_click=clear_ref_input, use_container_width=True)
-
 
 if "prefix" not in st.session_state:
     st.session_state["prefix"] = ""
@@ -1493,10 +1607,8 @@ def _log_run(*, input_text: str, split_refs: list[str], result_counts: dict, err
         if not db_url:
             return
     except FileNotFoundError:
-        # No secrets.toml in this environment → disable logging quietly
         return
     except Exception:
-        # Any other secrets parsing issue → also disable logging quietly
         return
 
     # conn = psycopg2.connect(db_url)
@@ -1527,7 +1639,7 @@ st.caption(
 )
 
 # =========================
-# Display helpers (ADD THESE ABOVE the "if st.button('Check References'):" block)
+# Display helpers
 # =========================
 
 def compute_doi_score(row: pd.Series) -> int:
@@ -1548,14 +1660,11 @@ def compute_doi_score(row: pd.Series) -> int:
     if bool(row.get("doi_derived_ok", False)):
         return 1
 
-    # "invalid DOI" is not stored as a flag, but your Notes includes it.
-    # This is a robust fallback: if a DOI is present and notes mention invalid, treat as -1.
     notes = str(row.get("Notes", "") or "").lower()
     if doi_present and "invalid doi" in notes:
         return -1
 
     return 0
-
 
 def add_link_columns(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
@@ -1581,7 +1690,6 @@ def add_link_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     return out
 
-
 def build_display_df(df: pd.DataFrame, *, view: str, include_review: bool) -> pd.DataFrame:
     df2 = df.copy()
     df2["DOI score"] = df2.apply(compute_doi_score, axis=1)
@@ -1590,13 +1698,12 @@ def build_display_df(df: pd.DataFrame, *, view: str, include_review: bool) -> pd
     if view == "Condensed":
         cols = ["Ref #", "Validation Result", "Score", "DOI score", "Notes", "DOI link"]
         if include_review:
-            cols.insert(3, "Is Review")  # after Score
+            cols.insert(3, "Is Review")
         for c in cols:
             if c not in df2.columns:
                 df2[c] = ""
         return df2[cols].copy()
 
-    # Full view (your existing full list, but using df2 so links & DOI score are available)
     cols = [
         "Ref #",
         "Validation Result",
@@ -1623,15 +1730,6 @@ def build_display_df(df: pd.DataFrame, *, view: str, include_review: bool) -> pd
         if c not in df2.columns:
             df2[c] = ""
 
-    # optional nicer labels
-    df2 = df2.rename(columns={
-        "Crossref Year": "Year",
-        "Crossref Journal": "Journal",
-        "PubMed Journal": "PubMed Jnl"
-    })
-
-    # if you renamed columns, ensure they still exist in cols
-    # (keep it simple: return the subset using existing columns only)
     existing_cols = [c for c in cols if c in df2.columns]
     return df2[existing_cols].copy()
 
@@ -1663,22 +1761,22 @@ if st.button("Check References"):
 
             results = asyncio.run(process_all(refs))
             df = pd.DataFrame(results)
-            # Summary (echo prefix)
             counts = df["Validation Result"].value_counts()
-            result_counts = counts.to_dict()  # <- for logging
+            result_counts = counts.to_dict()
 
             st.subheader("📊 Summary")
             st.write({
                 "Filename prefix": prefix,
                 "Total references": int(len(df)),
                 "✅ Real": int(counts.get("✅ Real", 0)),
+                "🟡 Manual review": int(counts.get(MANUAL_REVIEW_LABEL, 0)),
                 "📄 Web Source (trusted)": int(counts.get("📄 Web Source (trusted)", 0)),
                 "📄 Web Source": int(counts.get("📄 Web Source", 0)),
                 "⚠ Suspicious": int(counts.get("⚠ Suspicious", 0)),
                 "❌ possible falsification": int(counts.get("❌ possible falsification", 0)),
                 "❌ Error": int(counts.get("❌ Error", 0)),
             })
-    
+
             used_fallback = False
             df_display = build_display_df(df, view=table_view, include_review=check_reviews)
 
@@ -1704,6 +1802,8 @@ if st.button("Check References"):
                 def highlight_row(val):
                     if "Real" in val:
                         return "background-color: #d4edda; color: #155724"
+                    if "Manual review" in val:
+                        return "background-color: #fff4cc; color: #7a5c00"
                     if "Web Source" in val:
                         return "background-color: #e2e3e5; color: #383d41"
                     if "Suspicious" in val:
@@ -1726,10 +1826,6 @@ if st.button("Check References"):
             full_xlsx_filename = f"{prefix}validated_references_full_{today}.xlsx"
             condensed_xlsx_filename = f"{prefix}validated_references_condensed_{today}.xlsx"
 
-
-            today = date.today().isoformat()
-
-
             full_xlsx_bytes = build_excel_workbook(
                 df,
                 debug_mode=debug_mode,
@@ -1744,7 +1840,6 @@ if st.button("Check References"):
                 key="download_full_xlsx"
             )
 
-            condensed_xlsx_filename = f"{prefix}validated_references_condensed_{today}.xlsx"
             condensed_xlsx_bytes = build_excel_workbook(
                 df,
                 debug_mode=False,
@@ -1758,7 +1853,7 @@ if st.button("Check References"):
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key="download_condensed_xlsx"
             )
-           
+
             if used_fallback:
                 st.markdown("**Links:**")
                 link_rows = []
