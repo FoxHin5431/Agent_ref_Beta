@@ -339,21 +339,36 @@ def looks_scholarly_like(ref_clean: str) -> bool:
 
 def looks_like_org_web_source(ref: str, primary_domain: str = "") -> bool:
     ref_l = (ref or "").lower()
+    ref_clean = clean_ref(ref)
+
     hint_hit = any(h in ref_l for h in ORG_SOURCE_HINTS)
     trusted_hit = bool(primary_domain and domain_is_trusted(primary_domain))
+    has_url = bool(extract_urls(ref))
 
-    not_journal_like = not looks_scholarly_like(clean_ref(ref))
-    no_doiish = not bool(extract_doi(ref))
-    no_pmidish = not bool(re.search(r"\bPMID:\s*\d+\b", ref, flags=re.I))
-    no_pmcidish = not bool(extract_pmcid(ref))
+    has_identifier = bool(
+        extract_doi(ref)
+        or re.search(r"\bPMID:\s*\d+\b", ref, flags=re.I)
+        or extract_pmcid(ref)
+    )
+
+    ref_journal = extract_journal(ref_clean)
+    ref_vol, ref_issue, ref_pages, ref_pstart, ref_pend = extract_vol_issue_pages(ref_clean)
+
+    clearly_journal_structured = bool(
+        ref_journal
+        and (
+            has_bibliographic_shape(ref_clean)
+            or ref_vol
+            or ref_issue
+            or ref_pages
+        )
+    )
 
     return bool(
-        extract_urls(ref)
+        has_url
+        and not has_identifier
         and (hint_hit or trusted_hit)
-        and not_journal_like
-        and no_doiish
-        and no_pmidish
-        and no_pmcidish
+        and not clearly_journal_structured
     )
 
 def strip_accents(s: str) -> str:
@@ -466,13 +481,12 @@ def infer_doi_from_url_candidate(url: str) -> str:
 # =========================
 # Reference Splitting
 # =========================
-
 def split_references(text: str):
     if not text:
         return []
 
-    raw_lines = re.sub(r"\r\n?", "\n", text).strip().split("\n")
-    lines = [normalise_broken_url_spacing(ln.strip()) for ln in raw_lines]
+    text = normalise_broken_url_spacing(text)
+    lines = [ln.strip() for ln in re.sub(r"\r\n?", "\n", text).strip().split("\n")]
 
     year_any = re.compile(r"\b(?:1[89]\d{2}|20\d{2})[a-z]?\b", re.I)
     noise_start = re.compile(r"^(Available at|Accessed|\[Online\]|Online\]|Online\.|\[Accessed)", re.I)
@@ -497,15 +511,14 @@ def split_references(text: str):
         check = prep_line(ln)
         if noise_start.match(check) or url_line.match(check):
             return False
-        if author_or_org_comma.match(check) and year_any.search(check):
-            return True
-        if entity_paren_year.match(check):
-            return True
-        if entity_comma_year.match(check):
-            return True
-        return False
+        return bool(
+            (author_or_org_comma.match(check) and year_any.search(check))
+            or entity_paren_year.match(check)
+            or entity_comma_year.match(check)
+        )
 
-    refs, cur = [], []
+    refs = []
+    cur = []
 
     for ln in lines:
         if not ln:
@@ -524,21 +537,13 @@ def split_references(text: str):
     if cur:
         refs.append(" ".join(cur).strip())
 
-    refs = [" ".join(r.split()) for r in refs if r.strip()]
+    cleaned = []
+    for r in refs:
+        r = " ".join(r.split())
+        if r:
+            cleaned.append(r)
 
-    if len(refs) <= 1:
-        starts = [i for i, ln in enumerate(lines) if looks_like_start(ln)]
-        if len(starts) >= 2:
-            chunks = []
-            for idx, start in enumerate(starts):
-                end = starts[idx + 1] if idx + 1 < len(starts) else len(lines)
-                chunk = " ".join(prep_line(x) for x in lines[start:end]).strip()
-                if chunk:
-                    chunks.append(" ".join(chunk.split()))
-            if chunks:
-                refs = chunks
-
-    return refs
+    return cleaned
 
 # =========================
 # Scoring / Labels
@@ -772,6 +777,34 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
 
     trusted_web = bool(primary_domain and domain_is_trusted(primary_domain))
     manual_review_web = looks_like_org_web_source(ref, primary_domain=primary_domain)
+
+    if manual_review_web:
+        return {
+            "Reference": ref,
+            "Extracted DOI": "",
+            "DOI Source": "",
+            "Crossref DOI": "",
+            "Crossref Journal": "",
+            "Crossref Year": "",
+            "PubMed ID": "",
+            "PubMed Journal": "",
+            "PubMed Year": "",
+            "Score": 0,
+            "doi_ok": False,
+            "year_ok": bool(year),
+            "author_ok": bool(first_author),
+            "journal_ok": False,
+            "Validation Result": MANUAL_REVIEW_LABEL,
+            "Raw Result": MANUAL_REVIEW_LABEL,
+            "Notes": "URL detected; organisational/report/dataset-style source; manual review recommended",
+            "Domain": primary_domain,
+            "Domains": domains_joined,
+            "doi_explicit_ok": False,
+            "doi_derived_ok": False,
+            "Is Review": False,
+            "Review Source": "",
+            "Review Notes": "",
+        }
 
     ref_clean = clean_ref(ref)
     first_author = extract_first_author(ref_clean)
