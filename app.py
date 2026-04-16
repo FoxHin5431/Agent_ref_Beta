@@ -1351,6 +1351,17 @@ st.caption("This is a test version for new functions")
 
 if "sid" not in st.session_state:
     st.session_state["sid"] = str(uuid.uuid4())
+
+st.write(
+    """
+    Validates references via DOI / PubMed / Crossref and classifies results:
+    - ✅ Real → DOI verified with resolver + bibliographic match; OR Crossref-derived DOI verified at doi.org + match; OR PMCID/PMID verification
+    - 📄 Web Source (trusted) / 📄 Web Source → website/URL
+    - ⚠ Suspicious → partial mismatch or unverifiable but well-formed
+    - ❌ possible falsification → fabricated pairing or failed checks
+    """
+)
+
 with st.expander("How the result is decided"):
     st.markdown("""
 A reference is **only** marked **✅ Real** when it passes a verification rule.  
@@ -1403,15 +1414,6 @@ This means a high score can still be **⚠ Suspicious** or **❌ Possible falsif
 
 
 
-st.write(
-    """
-    Validates references via DOI / PubMed / Crossref and classifies results:
-    - ✅ Real → DOI verified with resolver + bibliographic match; OR Crossref-derived DOI verified at doi.org + match; OR PMCID/PMID verification
-    - 📄 Web Source (trusted) / 📄 Web Source → website/URL
-    - ⚠ Suspicious → partial mismatch or unverifiable but well-formed
-    - ❌ possible falsification → fabricated pairing or failed checks
-    """
-)
 
 st.markdown(
     """
