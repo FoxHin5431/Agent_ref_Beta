@@ -1442,18 +1442,18 @@ def build_excel_workbook(
         fmt_err = workbook.add_format({"bg_color": "#fde2e1", "font_color": "#7a1b17"})
 
      def autosize(ws, dataframe, wrap_cols=None):
-            wrap_cols = wrap_cols or []
-            for j, col in enumerate(dataframe.columns):
-                series = dataframe[col].astype(str)
-                max_len = max([len(col)] + [len(s) for s in series.tolist()]) if len(series) else len(col)
-                if col in ("Reference", "Notes", "AL notes", "Review Notes", "Source URL"):
-                    cap = 90
-                elif col in ("Domains", "Journal", "PubMed Journal", "Crossref Journal", "Review Source"):
-                    cap = 38
-                else:
-                    cap = 28
-                width = min(max_len + 2, cap)
-                ws.set_column(j, j, width, fmt_wrap if col in wrap_cols else None)
+        wrap_cols = wrap_cols or []
+        for j, col in enumerate(dataframe.columns):
+            series = dataframe[col].astype(str)
+            max_len = max([len(col)] + [len(s) for s in series.tolist()]) if len(series) else len(col)
+            if col in ("Reference", "Notes", "AL notes", "Review Notes", "Source URL"):
+                cap = 90
+            elif col in ("Domains", "Journal", "PubMed Journal", "Crossref Journal", "Review Source"):
+                cap = 38
+            else:
+                cap = 28
+            width = min(max_len + 2, cap)
+            ws.set_column(j, j, width, fmt_wrap if col in wrap_cols else None)
 
         def add_manual_review_dropdown(ws, dataframe):
             if "Manual review" in dataframe.columns:
