@@ -156,19 +156,27 @@ def strip_leading_list_marker(ref: str) -> str:
     if not ref:
         return ref
     return LEADING_LIST_MARKER_RE.sub("", ref).strip()
-
+    
 def normalise_broken_url_spacing(text: str) -> str:
     if not text:
         return text
 
-    def _fix_url(match):
-        url = match.group(0)
-        url = re.sub(r"\s+", "", url)
-        return url
+    fixed_lines = []
+    for line in re.split(r"\r?\n", text):
+        # fix spaces immediately after a hyphen inside a URL on the same line
+        line = re.sub(r"(https?://\S*?)-[ \t]+(\S+)", r"\1-\2", line)
 
-    text = re.sub(r"https?://[^\s<>\]]+(?:\s+[^\s<>\]]+)*", _fix_url, text, flags=re.I)
-    text = re.sub(r"(https?://\S*?)-\s+(\S+)", r"\1-\2", text)
-    return text
+        # collapse only spaces/tabs inside a URL, never across lines
+        def _fix_url(match):
+            url = match.group(0)
+            url = re.sub(r"[ \t]+", "", url)
+            return url
+
+        line = re.sub(r"https?://[^\s<>\]]+(?:[ \t]+[^\s<>\]]+)*", _fix_url, line, flags=re.I)
+        fixed_lines.append(line)
+
+    return "\n".join(fixed_lines)
+
 
 def clean_ref(ref: str) -> str:
     s = ref or ""
@@ -355,12 +363,7 @@ def looks_like_org_web_source(ref: str, primary_domain: str = "") -> bool:
     ref_vol, ref_issue, ref_pages, _, _ = extract_vol_issue_pages(ref_clean)
 
     clearly_journal_structured = bool(
-        ref_journal and (
-            has_bibliographic_shape(ref_clean)
-            or ref_vol
-            or ref_issue
-            or ref_pages
-        )
+        ref_journal and (ref_vol or ref_issue or ref_pages or has_bibliographic_shape(ref_clean))
     )
 
     return bool(
@@ -485,11 +488,9 @@ def split_references(text: str):
         return []
 
     text = normalise_broken_url_spacing(text)
-    lines = [ln.strip() for ln in re.sub(r"\r\n?", "\n", text).strip().split("\n")]
+    lines = [strip_leading_list_marker(ln.strip()) for ln in re.split(r"\r?\n", text)]
 
     year_any = re.compile(r"\b(?:1[89]\d{2}|20\d{2})[a-z]?\b", re.I)
-    noise_start = re.compile(r"^(Available at|Accessed|\[Online\]|Online\]|Online\.|\[Accessed)", re.I)
-    url_line = re.compile(r"^(https?://|doi\.org/|view-source:https?://)", re.I)
 
     author_or_org_comma = re.compile(r"^[A-ZÀ-ÖØ-Þ][^,]{0,160},", re.UNICODE)
     entity_paren_year = re.compile(
@@ -501,48 +502,41 @@ def split_references(text: str):
         re.UNICODE
     )
 
-    def prep_line(ln: str) -> str:
-        return strip_leading_list_marker(ln)
+    noise_line = re.compile(r"^(Available at|Accessed|\[Online\]|Online\.?)", re.I)
 
-    def looks_like_start(ln: str) -> bool:
-        if not ln:
+    def looks_like_start(line: str) -> bool:
+        if not line:
             return False
-        check = prep_line(ln)
-        if noise_start.match(check) or url_line.match(check):
+        if noise_line.match(line):
             return False
         return bool(
-            (author_or_org_comma.match(check) and year_any.search(check))
-            or entity_paren_year.match(check)
-            or entity_comma_year.match(check)
+            (author_or_org_comma.match(line) and year_any.search(line))
+            or entity_paren_year.match(line)
+            or entity_comma_year.match(line)
         )
 
     refs = []
-    cur = []
+    current = []
 
-    for ln in lines:
-        if not ln:
-            if cur:
-                refs.append(" ".join(cur).strip())
-                cur = []
+    for line in lines:
+        if not line:
+            if current:
+                refs.append(" ".join(current).strip())
+                current = []
             continue
 
-        if looks_like_start(ln):
-            if cur:
-                refs.append(" ".join(cur).strip())
-            cur = [prep_line(ln)]
+        if looks_like_start(line):
+            if current:
+                refs.append(" ".join(current).strip())
+            current = [line]
         else:
-            cur.append(ln)
+            current.append(line)
 
-    if cur:
-        refs.append(" ".join(cur).strip())
+    if current:
+        refs.append(" ".join(current).strip())
 
-    cleaned = []
-    for r in refs:
-        r = " ".join(r.split())
-        if r:
-            cleaned.append(r)
-
-    return cleaned
+    refs = [" ".join(r.split()) for r in refs if r.strip()]
+    return refs
 
 # =========================
 # Scoring / Labels
