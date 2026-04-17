@@ -1398,7 +1398,7 @@ def build_excel_workbook(
     else:
         dom_mat = pd.DataFrame()
 
-    issues = export_df[
+        issues = export_df[
         export_df["Validation Result"].isin([
             "⚠ Suspicious",
             "❌ possible falsification",
@@ -1410,11 +1410,11 @@ def build_excel_workbook(
     if view == "Condensed":
         issues["DOI score"] = issues.apply(compute_doi_score, axis=1)
 
-        issue_cols += ["Manual review", "AL notes", "Notes", "Source URL", "Reference"]
+        issue_cols = ["Ref #", "Validation Result", "Score", "DOI score"]
         if include_review:
             issue_cols += ["Is Review"]
 
-        issue_cols += ["Manual review", "AL notes", "Notes", "Reference"]
+        issue_cols += ["Manual review", "AL notes", "Notes", "Source URL", "Reference"]
         issues = issues[[c for c in issue_cols if c in issues.columns]].copy()
     else:
         issues = issues[[c for c in main.columns if c in issues.columns]].copy()
