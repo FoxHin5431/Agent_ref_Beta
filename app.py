@@ -869,100 +869,6 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
         }
 
 
-    ref_clean = clean_ref(ref)
-    first_author = extract_first_author(ref_clean)
-    year = extract_year(ref_clean)
-    ref_journal = extract_journal(ref_clean).lower()
-    title = extract_title(ref_clean)
-    doi_val = extract_doi(ref)
-    pmid_match = re.search(r"\bPMID:\s*(\d+)\b", ref, flags=re.I)
-    pmcid_val = extract_pmcid(ref)
-    shape_ok = has_bibliographic_shape(ref_clean)
-
-    ref_vol, ref_issue, ref_pages, ref_pstart, ref_pend = extract_vol_issue_pages(ref_clean)
-
-    crossref_doi = crossref_journal = crossref_year = ""
-    pubmed_id = pubmed_journal = pubmed_year = ""
-
-    doi_ok = year_ok = author_ok = journal_ok = False
-    title_ok = False
-    vol_ok = issue_ok = pages_ok = False
-
-    doi_source = ""
-    had_crossref_candidate = False
-    doi_explicit_ok = False
-    doi_derived_ok = False
-    doi_invalid = False
-
-    if not doi_val and urls:
-        for u in urls:
-            cand = infer_doi_from_url_candidate(u)
-            if cand:
-                doi_val = cand
-                doi_source = "heuristic"
-                break
-
-    scholarly_like = looks_scholarly_like(ref_clean)
-
-    if manual_review_web:
-        return {
-            "Reference": ref,
-            "Extracted DOI": "",
-            "DOI Source": "",
-            "Crossref DOI": "",
-            "Crossref Journal": "",
-            "Crossref Year": "",
-            "PubMed ID": "",
-            "PubMed Journal": "",
-            "PubMed Year": "",
-            "Score": 0,
-            "Source URL": source_url,
-            "doi_ok": False,
-            "year_ok": bool(year),
-            "author_ok": bool(first_author),
-            "journal_ok": False,
-            "Validation Result": MANUAL_REVIEW_LABEL,
-            "Raw Result": MANUAL_REVIEW_LABEL,
-            "Notes": "URL detected; organisational/report/dataset-style source; manual review recommended",
-            "Domain": primary_domain,
-            "Domains": domains_joined,
-            "doi_explicit_ok": False,
-            "doi_derived_ok": False,
-            "Is Review": False,
-            "Review Source": "",
-            "Review Notes": "",
-        }
-
-    if not (doi_val or pmid_match or pmcid_val) and primary_domain and not scholarly_like:
-        label = "📄 Web Source (trusted)" if trusted_web else "📄 Web Source"
-        return {
-            "Reference": ref,
-            "Extracted DOI": "",
-            "DOI Source": "",
-            "Crossref DOI": "",
-            "Crossref Journal": "",
-            "Crossref Year": "",
-            "PubMed ID": "",
-            "PubMed Journal": "",
-            "PubMed Year": "",
-            "Score": 0,
-            "Source URL": source_url,
-            "doi_ok": False,
-            "year_ok": bool(year),
-            "author_ok": bool(first_author),
-            "journal_ok": False,
-            "Validation Result": label,
-            "Raw Result": label,
-            "Notes": "URL detected; treated as non-academic web source",
-            "Domain": primary_domain,
-            "Domains": domains_joined,
-            "doi_explicit_ok": False,
-            "doi_derived_ok": False,
-            "Is Review": False,
-            "Review Source": "",
-            "Review Notes": "",
-        }
-
     try:
         if doi_val:
             resp = await fetch_crossref_doi(client, doi_val)
@@ -1441,111 +1347,12 @@ def build_excel_workbook(
         fmt_ai = workbook.add_format({"bg_color": "#f8d7da", "font_color": "#721c24"})
         fmt_err = workbook.add_format({"bg_color": "#fde2e1", "font_color": "#7a1b17"})
 
-     def autosize(ws, dataframe, wrap_cols=None):
-        wrap_cols = wrap_cols or []
-        for j, col in enumerate(dataframe.columns):
-            series = dataframe[col].astype(str)
-            max_len = max([len(col)] + [len(s) for s in series.tolist()]) if len(series) else len(col)
-            if col in ("Reference", "Notes", "AL notes", "Review Notes", "Source URL"):
-                cap = 90
-            elif col in ("Domains", "Journal", "PubMed Journal", "Crossref Journal", "Review Source"):
-                cap = 38
-            else:
-                cap = 28
-            width = min(max_len + 2, cap)
-            ws.set_column(j, j, width, fmt_wrap if col in wrap_cols else None)
-
-        def add_manual_review_dropdown(ws, dataframe):
-            if "Manual review" in dataframe.columns:
-                col_idx = list(dataframe.columns).index("Manual review")
-                nrows = max(len(dataframe), 200)
-                ws.data_validation(
-                    1, col_idx, nrows, col_idx,
-                    {"validate": "list", "source": ["Yes", "No"]}
-                )
-
-        def style_headers(ws, dataframe):
-            for j, col in enumerate(dataframe.columns):
-                if col in ("Is Review", "Review Source", "Review Notes"):
-                    ws.write(0, j, col, fmt_review_header)
-                else:
-                    ws.write(0, j, col, fmt_header)
-
-        def write_table(sheet_name, dataframe, wrap_cols=None):
-            if dataframe.empty:
-                pd.DataFrame({"Info": ["No data"]}).to_excel(writer, sheet_name=sheet_name, index=False)
-                return
-
-            dataframe.to_excel(writer, sheet_name=sheet_name, index=False, startrow=0)
-            ws = writer.sheets[sheet_name]
-            nrows, ncols = dataframe.shape
-
-            ws.set_row(0, None, fmt_header)
-            style_headers(ws, dataframe)
-            ws.freeze_panes(1, 1)
-            autosize(ws, dataframe, wrap_cols=wrap_cols)
-            add_manual_review_dropdown(ws, dataframe)
-            ws.autofilter(0, 0, nrows, ncols - 1)
-
-            if "Validation Result" in dataframe.columns:
-                col_idx = list(dataframe.columns).index("Validation Result")
-                first = 1
-                last = nrows
-                ws.conditional_format(first, col_idx, last, col_idx, {
-                    "type": "text", "criteria": "containing", "value": "Real", "format": fmt_real
-                })
-                ws.conditional_format(first, col_idx, last, col_idx, {
-                    "type": "text", "criteria": "containing", "value": "Manual review", "format": fmt_manual
-                })
-                ws.conditional_format(first, col_idx, last, col_idx, {
-                    "type": "text", "criteria": "containing", "value": "Web Source", "format": fmt_web
-                })
-                ws.conditional_format(first, col_idx, last, col_idx, {
-                    "type": "text", "criteria": "containing", "value": "Suspicious", "format": fmt_susp
-                })
-                ws.conditional_format(first, col_idx, last, col_idx, {
-                    "type": "text", "criteria": "containing", "value": "AI", "format": fmt_ai
-                })
-                ws.conditional_format(first, col_idx, last, col_idx, {
-                    "type": "text", "criteria": "containing", "value": "Error", "format": fmt_err
-                })
-
-        counts.to_excel(writer, sheet_name="Summary", index=False, startrow=0)
-        ws_sum = writer.sheets["Summary"]
-        ws_sum.set_row(0, None, fmt_header)
-        ws_sum.freeze_panes(1, 0)
-        ws_sum.autofilter(0, 0, len(counts), len(counts.columns) - 1)
-
-        startrow = len(counts) + 3
-        ws_sum.write_string(startrow, 0, "Top Domains (first 50):", fmt_header)
-        if not top_domains.empty:
-            top_domains.to_excel(writer, sheet_name="Summary", index=False, startrow=startrow + 1)
-            ws_sum.autofilter(startrow + 1, 0, startrow + 1 + len(top_domains), len(top_domains.columns) - 1)
-        else:
-            ws_sum.write_string(startrow + 1, 0, "No domains found.")
-
-        wrap_cols = [
-            "Reference", "Notes", "AL notes", "Review Notes",
-            "Domains", "Journal", "PubMed Journal", "Crossref Journal", "Review Source", "Source URL"
-        ]
-        write_table("Results", main, wrap_cols=wrap_cols)
-        write_table("Issues", issues, wrap_cols=wrap_cols)
-
-        if not dom_mat.empty:
-            dom_mat.to_excel(writer, sheet_name="Domains", index=False)
-            ws_dom = writer.sheets["Domains"]
-            ws_dom.set_row(0, None, fmt_header)
-            ws_dom.freeze_panes(1, 1)
-            ws_dom.autofilter(0, 0, len(dom_mat), len(dom_mat.columns) - 1)
-
-    return out.getvalue()
-
         def autosize(ws, dataframe, wrap_cols=None):
             wrap_cols = wrap_cols or []
             for j, col in enumerate(dataframe.columns):
                 series = dataframe[col].astype(str)
                 max_len = max([len(col)] + [len(s) for s in series.tolist()]) if len(series) else len(col)
-                if col in ("Reference", "Notes", "AL notes", "Review Notes"):
+                if col in ("Reference", "Notes", "AL notes", "Review Notes", "Source URL"):
                     cap = 90
                 elif col in ("Domains", "Journal", "PubMed Journal", "Crossref Journal", "Review Source"):
                     cap = 38
@@ -1625,7 +1432,7 @@ def build_excel_workbook(
 
         wrap_cols = [
             "Reference", "Notes", "AL notes", "Review Notes",
-            "Domains", "Journal", "PubMed Journal", "Crossref Journal", "Review Source"
+            "Domains", "Journal", "PubMed Journal", "Crossref Journal", "Review Source", "Source URL"
         ]
         write_table("Results", main, wrap_cols=wrap_cols)
         write_table("Issues", issues, wrap_cols=wrap_cols)
