@@ -296,7 +296,10 @@ def extract_urls(ref: str):
             seen.add(u)
             out.append(u)
     return out
-
+def extract_primary_url(ref: str) -> str:
+    urls = extract_urls(ref)
+    return urls[0] if urls else ""
+    
 def extract_domains(ref: str):
     urls = extract_urls(ref)
     seen, out = set(), []
@@ -758,7 +761,7 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
     is_review = False
     review_source = ""
     review_notes = ""
-
+    source_url = urls[0] if urls else ""
     # initialise early so any short-circuit return is safe
     ref = strip_leading_list_marker(ref or "")
     ref = normalise_broken_url_spacing(ref)
@@ -818,6 +821,7 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
             "PubMed Journal": "",
             "PubMed Year": "",
             "Score": 0,
+            "Source URL": source_url,
             "doi_ok": False,
             "year_ok": bool(year),
             "author_ok": bool(first_author),
@@ -847,6 +851,7 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
             "PubMed Journal": "",
             "PubMed Year": "",
             "Score": 0,
+            "Source URL": source_url,
             "doi_ok": False,
             "year_ok": bool(year),
             "author_ok": bool(first_author),
@@ -911,6 +916,7 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
             "PubMed Journal": "",
             "PubMed Year": "",
             "Score": 0,
+            "Source URL": source_url,
             "doi_ok": False,
             "year_ok": bool(year),
             "author_ok": bool(first_author),
@@ -940,6 +946,7 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
             "PubMed Journal": "",
             "PubMed Year": "",
             "Score": 0,
+            "Source URL": source_url,
             "doi_ok": False,
             "year_ok": bool(year),
             "author_ok": bool(first_author),
@@ -1236,6 +1243,7 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
             "PubMed Journal": pubmed_journal,
             "PubMed Year": pubmed_year,
             "Score": 0,
+            "Source URL": source_url,
             "doi_ok": doi_ok,
             "year_ok": year_ok,
             "author_ok": author_ok,
@@ -1300,6 +1308,7 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
         "PubMed Journal": pubmed_journal,
         "PubMed Year": pubmed_year,
         "Score": int(weighted_score),
+        "Source URL": source_url,
         "doi_ok": doi_ok,
         "year_ok": year_ok,
         "author_ok": author_ok,
@@ -1340,7 +1349,7 @@ def build_excel_workbook(
         if include_review:
             main_cols += ["Is Review"]
 
-        main_cols += ["Manual review", "AL notes", "Notes", "Reference"]
+        main_cols += ["Manual review", "AL notes", "Notes", "Source URL", "Reference"]
         main = export_df[[c for c in main_cols if c in export_df.columns]].copy()
 
     else:
@@ -1351,7 +1360,7 @@ def build_excel_workbook(
 
         base_order += [
             "Manual review", "AL notes",
-            "Reference", "Domain", "Domains",
+            "Reference", "Domain", "Domains", "Source URL",
             "Extracted DOI", "DOI Source", "Crossref DOI", "Crossref Journal", "Crossref Year",
             "PubMed ID", "PubMed Journal", "PubMed Year", "Notes"
         ]
@@ -1401,7 +1410,7 @@ def build_excel_workbook(
     if view == "Condensed":
         issues["DOI score"] = issues.apply(compute_doi_score, axis=1)
 
-        issue_cols = ["Ref #", "Validation Result", "Score", "DOI score"]
+        issue_cols += ["Manual review", "AL notes", "Notes", "Source URL", "Reference"]
         if include_review:
             issue_cols += ["Is Review"]
 
@@ -1778,6 +1787,21 @@ def add_link_columns(df: pd.DataFrame) -> pd.DataFrame:
         return ""
 
     out["PubMed link"] = out.apply(lambda r: _pubmed_link(str(r.get("PubMed ID") or "")), axis=1)
+    out["Source link"] = out.apply(lambda r: str(r.get("Source URL") or "").strip(), axis=1)
+
+    return out
+
+    def _pubmed_link(val: str) -> str:
+        v = (val or "").strip()
+        if not v:
+            return ""
+        if v.upper().startswith("PMC"):
+            return f"https://www.ncbi.nlm.nih.gov/pmc/articles/{v}/"
+        if v.isdigit():
+            return f"https://pubmed.ncbi.nlm.nih.gov/{v}/"
+        return ""
+
+    out["PubMed link"] = out.apply(lambda r: _pubmed_link(str(r.get("PubMed ID") or "")), axis=1)
 
     return out
 
@@ -1787,7 +1811,7 @@ def build_display_df(df: pd.DataFrame, *, view: str, include_review: bool) -> pd
     df2 = add_link_columns(df2)
 
     if view == "Condensed":
-        cols = ["Ref #", "Validation Result", "Score", "DOI score", "Notes", "DOI link"]
+        cols = ["Ref #", "Validation Result", "Score", "DOI score", "Notes", "Source link", "DOI link"]
         if include_review:
             cols.insert(3, "Is Review")
         for c in cols:
@@ -1795,7 +1819,7 @@ def build_display_df(df: pd.DataFrame, *, view: str, include_review: bool) -> pd
                 df2[c] = ""
         return df2[cols].copy()
 
-    cols = [
+        cols = [
         "Ref #",
         "Validation Result",
         "Score",
@@ -1803,10 +1827,12 @@ def build_display_df(df: pd.DataFrame, *, view: str, include_review: bool) -> pd
         "Is Review", "Review Source",
         "Reference",
         "Domain", "Domains",
+        "Source URL",
         "Extracted DOI", "DOI Source",
         "Crossref DOI", "Crossref Journal", "Crossref Year",
         "PubMed ID", "PubMed Journal", "PubMed Year",
         "Notes",
+        "Source link",
         "DOI link",
         "PubMed link",
     ]
@@ -1874,6 +1900,8 @@ if st.button("Check References"):
             try:
                 from streamlit import column_config
                 cfg = {}
+                if "Source link" in df_display.columns:
+                    cfg["Source link"] = column_config.LinkColumn("Source link")
                 if "DOI link" in df_display.columns:
                     cfg["DOI link"] = column_config.LinkColumn("DOI link")
                 if "PubMed link" in df_display.columns:
@@ -1949,13 +1977,16 @@ if st.button("Check References"):
                 st.markdown("**Links:**")
                 link_rows = []
                 for _, r in df_display.iterrows():
-                    if r.get("DOI link") or r.get("PubMed link"):
-                        link_rows.append(
-                            f"- Ref {int(r['Ref #'])}: "
-                            f"{('[DOI](' + r['DOI link'] + ')') if r.get('DOI link') else ''} "
-                            f"{(' | ' if r.get('DOI link') and r.get('PubMed link') else '')}"
-                            f"{('[PubMed/PMC](' + r['PubMed link'] + ')') if r.get('PubMed link') else ''}"
-                        )
+                    if r.get("Source link") or r.get("DOI link") or r.get("PubMed link"):
+                        parts = []
+                        if r.get("Source link"):
+                            parts.append(f"[Source]({r['Source link']})")
+                        if r.get("DOI link"):
+                            parts.append(f"[DOI]({r['DOI link']})")
+                        if r.get("PubMed link"):
+                            parts.append(f"[PubMed/PMC]({r['PubMed link']})")
+
+                        link_rows.append(f"- Ref {int(r['Ref #'])}: " + " | ".join(parts))
                 if link_rows:
                     st.markdown("\n".join(link_rows))
 
