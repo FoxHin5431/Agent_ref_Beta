@@ -1819,7 +1819,7 @@ def build_display_df(df: pd.DataFrame, *, view: str, include_review: bool) -> pd
                 df2[c] = ""
         return df2[cols].copy()
 
-        cols = [
+    cols = [
         "Ref #",
         "Validation Result",
         "Score",
@@ -1836,6 +1836,7 @@ def build_display_df(df: pd.DataFrame, *, view: str, include_review: bool) -> pd
         "DOI link",
         "PubMed link",
     ]
+
     if not include_review:
         cols = [c for c in cols if c not in ("Is Review", "Review Source")]
 
