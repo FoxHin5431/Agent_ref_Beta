@@ -1441,7 +1441,7 @@ def build_excel_workbook(
         fmt_ai = workbook.add_format({"bg_color": "#f8d7da", "font_color": "#721c24"})
         fmt_err = workbook.add_format({"bg_color": "#fde2e1", "font_color": "#7a1b17"})
 
-        def autosize(ws, dataframe, wrap_cols=None):
+     def autosize(ws, dataframe, wrap_cols=None):
             wrap_cols = wrap_cols or []
             for j, col in enumerate(dataframe.columns):
                 series = dataframe[col].astype(str)
