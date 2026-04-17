@@ -761,8 +761,7 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
     is_review = False
     review_source = ""
     review_notes = ""
-    source_url = urls[0] if urls else ""
-    # initialise early so any short-circuit return is safe
+
     ref = strip_leading_list_marker(ref or "")
     ref = normalise_broken_url_spacing(ref)
 
@@ -778,6 +777,7 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
 
     domains = extract_domains(ref)
     urls = extract_urls(ref)
+    source_url = urls[0] if urls else ""
     primary_domain = domains[0] if domains else ""
     domains_joined = ", ".join(domains)
 
