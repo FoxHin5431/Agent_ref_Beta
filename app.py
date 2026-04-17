@@ -336,7 +336,7 @@ def looks_scholarly_like(ref_clean: str) -> bool:
     pages = re.search(r"\bpp?\.\s*\d+", ref_clean, flags=re.I) is not None or re.search(r"\b\d+\s*[-–]\s*\d+\b", ref_clean) is not None
     title_len = len(extract_title(ref_clean) or "")
     return yr and (jnl or shape or vol_issue or pages or title_len >= 25)
-
+    
 def looks_like_org_web_source(ref: str, primary_domain: str = "") -> bool:
     ref_l = (ref or "").lower()
     ref_clean = clean_ref(ref)
@@ -352,11 +352,10 @@ def looks_like_org_web_source(ref: str, primary_domain: str = "") -> bool:
     )
 
     ref_journal = extract_journal(ref_clean)
-    ref_vol, ref_issue, ref_pages, ref_pstart, ref_pend = extract_vol_issue_pages(ref_clean)
+    ref_vol, ref_issue, ref_pages, _, _ = extract_vol_issue_pages(ref_clean)
 
     clearly_journal_structured = bool(
-        ref_journal
-        and (
+        ref_journal and (
             has_bibliographic_shape(ref_clean)
             or ref_vol
             or ref_issue
@@ -761,14 +760,24 @@ def choose_best_crossref_item(ref, items, first_author, year, ref_journal, title
 # =========================
 # Validation
 # =========================
-
 async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool = False):
     is_review = False
     review_source = ""
     review_notes = ""
 
+    # initialise early so any short-circuit return is safe
     ref = strip_leading_list_marker(ref or "")
     ref = normalise_broken_url_spacing(ref)
+
+    ref_clean = clean_ref(ref)
+    first_author = extract_first_author(ref_clean)
+    year = extract_year(ref_clean)
+    ref_journal = extract_journal(ref_clean).lower()
+    title = extract_title(ref_clean)
+    doi_val = extract_doi(ref)
+    pmid_match = re.search(r"\bPMID:\s*(\d+)\b", ref, flags=re.I)
+    pmcid_val = extract_pmcid(ref)
+    shape_ok = has_bibliographic_shape(ref_clean)
 
     domains = extract_domains(ref)
     urls = extract_urls(ref)
@@ -777,6 +786,31 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
 
     trusted_web = bool(primary_domain and domain_is_trusted(primary_domain))
     manual_review_web = looks_like_org_web_source(ref, primary_domain=primary_domain)
+
+    ref_vol, ref_issue, ref_pages, ref_pstart, ref_pend = extract_vol_issue_pages(ref_clean)
+
+    crossref_doi = crossref_journal = crossref_year = ""
+    pubmed_id = pubmed_journal = pubmed_year = ""
+
+    doi_ok = year_ok = author_ok = journal_ok = False
+    title_ok = False
+    vol_ok = issue_ok = pages_ok = False
+
+    doi_source = ""
+    had_crossref_candidate = False
+    doi_explicit_ok = False
+    doi_derived_ok = False
+    doi_invalid = False
+
+    if not doi_val and urls:
+        for u in urls:
+            cand = infer_doi_from_url_candidate(u)
+            if cand:
+                doi_val = cand
+                doi_source = "heuristic"
+                break
+
+    scholarly_like = looks_scholarly_like(ref_clean)
 
     if manual_review_web:
         return {
@@ -805,6 +839,36 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
             "Review Source": "",
             "Review Notes": "",
         }
+
+    if not (doi_val or pmid_match or pmcid_val) and primary_domain and not scholarly_like:
+        label = "📄 Web Source (trusted)" if trusted_web else "📄 Web Source"
+        return {
+            "Reference": ref,
+            "Extracted DOI": "",
+            "DOI Source": "",
+            "Crossref DOI": "",
+            "Crossref Journal": "",
+            "Crossref Year": "",
+            "PubMed ID": "",
+            "PubMed Journal": "",
+            "PubMed Year": "",
+            "Score": 0,
+            "doi_ok": False,
+            "year_ok": bool(year),
+            "author_ok": bool(first_author),
+            "journal_ok": False,
+            "Validation Result": label,
+            "Raw Result": label,
+            "Notes": "URL detected; treated as non-academic web source",
+            "Domain": primary_domain,
+            "Domains": domains_joined,
+            "doi_explicit_ok": False,
+            "doi_derived_ok": False,
+            "Is Review": False,
+            "Review Source": "",
+            "Review Notes": "",
+        }
+
 
     ref_clean = clean_ref(ref)
     first_author = extract_first_author(ref_clean)
