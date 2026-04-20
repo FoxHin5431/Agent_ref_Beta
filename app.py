@@ -34,8 +34,8 @@ import unicodedata
 import uuid
 from datetime import datetime, timezone
 import xml.etree.ElementTree as ET
-import psycopg2
-from psycopg2.extras import Json
+#import psycopg2
+#from psycopg2.extras import Json
 
 # =========================
 # Configuration
