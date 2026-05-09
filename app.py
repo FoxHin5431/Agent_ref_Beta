@@ -158,25 +158,35 @@ def strip_leading_list_marker(ref: str) -> str:
     return LEADING_LIST_MARKER_RE.sub("", ref).strip()
     
 def normalise_broken_url_spacing(text: str) -> str:
+    """
+    Fix only obvious URL line/spacing breaks without swallowing citation text
+    such as (Accessed 24 April 2026).
+    """
     if not text:
         return text
 
     fixed_lines = []
     for line in re.split(r"\r?\n", text):
-        # fix spaces immediately after a hyphen inside a URL on the same line
+        # Fix spaces immediately after a hyphen inside a URL on the same line.
+        # Example: https://site.org/abc- def -> https://site.org/abc-def
         line = re.sub(r"(https?://\S*?)-[ \t]+(\S+)", r"\1-\2", line)
 
-        # collapse only spaces/tabs inside a URL, never across lines
-        def _fix_url(match):
+        # Fix spaces inside explicit DOI URLs only, not after the URL.
+        # Example: https://doi.org/10.1000/abc 123 -> https://doi.org/10.1000/abc123
+        def _fix_doi_url(match):
             url = match.group(0)
-            url = re.sub(r"[ \t]+", "", url)
-            return url
+            return re.sub(r"[ \t]+", "", url)
 
-        line = re.sub(r"https?://[^\s<>\]]+(?:[ \t]+[^\s<>\]]+)*", _fix_url, line, flags=re.I)
+        line = re.sub(
+            r"https?://(?:dx\.)?doi\.org/10\.\d{4,9}/[^\s<>\]]+",
+            _fix_doi_url,
+            line,
+            flags=re.I
+        )
+
         fixed_lines.append(line)
 
     return "\n".join(fixed_lines)
-
 
 def clean_ref(ref: str) -> str:
     s = ref or ""
@@ -186,9 +196,10 @@ def clean_ref(ref: str) -> str:
 
     s = re.sub(r"\[(?:Online|online)\]", "", s, flags=re.I)
     s = re.sub(r"\bAvailable at\b.*?$", "", s, flags=re.I)
-    s = re.sub(r"\bAccessed(?: date)?\b.*?$", "", s, flags=re.I)
+    s = re.sub(r"\b(?:Accessed|Assessed)(?: date)?\b.*?$", "", s, flags=re.I)
     s = " ".join(s.split())
     return s.strip(" .")
+
 
 def extract_first_author(ref: str) -> str:
     s = ref.lstrip(" \"'“”‘’")
@@ -259,20 +270,68 @@ def extract_title(ref: str) -> str:
     )
     return m2.group(1).strip() if m2 else ""
 
+def clean_doi_value(raw: str) -> str:
+    """
+    Cleans DOI strings and removes common trailing citation/access-date text.
+    """
+    if not raw:
+        return ""
+
+    s = urllib.parse.unquote(str(raw)).strip()
+
+    s = re.sub(r"^https?://(?:dx\.)?doi\.org/", "", s, flags=re.I)
+    s = re.sub(r"^doi:\s*", "", s, flags=re.I)
+
+    # Stop before access-date text, including cases where spacing has already collapsed:
+    # 10.7326/M14-0737(Assessed24April2026)
+    s = re.split(r"(?i)(?:\s|\(|%28)*(?:accessed|assessed)\b", s)[0]
+
+    # Remove common trailing punctuation.
+    s = s.rstrip(".,;:]}>'\"")
+
+    # Remove a trailing unmatched closing bracket.
+    while s.endswith(")") and s.count("(") < s.count(")"):
+        s = s[:-1].rstrip(".,;:")
+
+    return s
+
 def extract_doi(ref: str):
-    m = re.search(r"\[(10\.\d{4,9}/[-._;()/:A-Za-z0-9]+)\]\(https?://doi\.org/\1\)", ref)
-    if m:
-        return m.group(1).rstrip(".,;:)")
-    m = re.search(r"\[(10\.\d{4,9}/[-._;()/:A-Za-z0-9]+)\]", ref)
-    if m:
-        return m.group(1).rstrip(".,;:)")
-    m = re.search(r"doi\.org/(10\.\d{4,9}/[-._;()/:A-Za-z0-9]+)", ref)
-    if m:
-        return m.group(1).rstrip(".,;:)")
-    m = re.search(r"(10\.\d{4,9}/[-._;()/:A-Za-z0-9]+)", ref)
-    if m:
-        return m.group(1).rstrip(".,;:)")
+    if not ref:
+        return None
+
+    patterns = [
+        r"\[(10\.\d{4,9}/[^\s<>\]]+)\]\(https?://(?:dx\.)?doi\.org/\1\)",
+        r"\[(10\.\d{4,9}/[^\s<>\]]+)\]",
+        r"doi\.org/(10\.\d{4,9}/[^\s<>\]]+)",
+        r"\bdoi:\s*(10\.\d{4,9}/[^\s<>\]]+)",
+        r"\b(10\.\d{4,9}/[^\s<>\]]+)",
+    ]
+
+    for pat in patterns:
+        m = re.search(pat, ref, flags=re.I)
+        if m:
+            doi = clean_doi_value(m.group(1))
+            return doi if doi else None
+
     return None
+    
+def clean_url_value(url: str) -> str:
+    if not url:
+        return ""
+
+    u = str(url).strip()
+
+    # Stop before access-date text.
+    u = re.split(r"(?i)(?:\s|\(|%28)*(?:accessed|assessed)\b", u)[0]
+
+    # Remove common trailing punctuation.
+    u = u.rstrip(".,;")
+
+    # Remove unmatched trailing closing bracket.
+    while u.endswith(")") and u.count("(") < u.count(")"):
+        u = u[:-1].rstrip(".,;")
+
+    return u
 
 def extract_pmcid(ref: str):
     m = re.search(r"\bPMCID:\s*(PMC\d+)\b", ref, flags=re.I)
@@ -282,20 +341,24 @@ def extract_pmcid(ref: str):
     if m:
         return m.group(1).upper()
     return ""
-
 def extract_urls(ref: str):
     if not ref:
         return []
+
     s = normalise_broken_url_spacing(ref)
     urls = re.findall(r"https?://[^\s<>\]]+", s, flags=re.I)
+
     out = []
     seen = set()
+
     for u in urls:
-        u = u.rstrip(").,;")
-        if u not in seen:
+        u = clean_url_value(u)
+        if u and u not in seen:
             seen.add(u)
             out.append(u)
+
     return out
+
 def extract_primary_url(ref: str) -> str:
     urls = extract_urls(ref)
     return urls[0] if urls else ""
