@@ -2,6 +2,9 @@
 
 Streamlit app for validating reference lists using DOI (Crossref + doi.org), PubMed/PMC, and heuristic checks.
 
+The interface includes a **Reference debugging tool** link to the hosted Regex
+Inspector for examining extracted fields and validation comparisons.
+
 ## Run locally
 
 1. Create a virtual environment and install dependencies:
