@@ -14,6 +14,13 @@ Streamlit app for validating reference lists using DOI (Crossref + doi.org), Pub
 3. Run:
    - `streamlit run app.py`
 
+## Run tests
+
+- `python -m unittest discover -s tests -v`
+
+The regression suite uses saved metadata rather than live API calls, so lookup
+availability does not affect the result.
+
 ## Logging (optional)
 
 Logging is controlled by Streamlit secrets:
