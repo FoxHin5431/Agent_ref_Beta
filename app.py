@@ -1964,6 +1964,16 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+with st.expander("Reference debugging tool"):
+    st.markdown(
+        """
+        Use the regex inspector to see how Agent Ref extracts each part of a reference
+        and compares it against the external validation result.
+
+        [Open the regex inspector](https://agent-ref-regex-inspector.streamlit.app/)
+        """
+    )
+
 debug_mode = st.checkbox("Show debug details", value=False)
 
 check_reviews = st.checkbox(
