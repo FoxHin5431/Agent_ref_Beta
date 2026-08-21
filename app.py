@@ -1,7 +1,7 @@
 # reference_checker_app.py
 # Streamlit app: bulk reference validator (DOI / PubMed / Crossref) with robust splitting & Excel export
 # Updates applied (hardened):
-# - Tight explicit vs derived DOI scoring (only hard-accept returns ✅ Real)
+# - Explicit DOI scoring separated from derived-DOI metadata discovery
 # - Accent-aware surname matching ("Çe" -> "Ce")
 # - Title similarity check (explicit & derived DOI flows)
 # - Volume/Issue/Pages parsing and matching (guards against wrong-but-resolving DOIs)
@@ -17,13 +17,16 @@
 # - DOI-from-URL inference registry (Nature, eLife, ScienceDirect PIIs — guarded by doi.org resolution)
 # - API etiquette + retry/backoff
 # - Clickable DOI/PubMed links via st.data_editor LinkColumn (with fallback)
-# - Derived DOI can hard-accept (✅ Real) ONLY if doi.org resolves AND metadata gates pass
+# - Derived DOI is metadata-only and never supplies DOI score/acceptance evidence
+# - Strong title/author matches with multiple confirmed metadata conflicts are
+#   classified before the numeric score fallback
 # - NEW: leading bullets / list markers stripped before parsing
 # - NEW: organisational/report/dataset web references with URLs routed to manual review rather than false
 
 import streamlit as st
 import pandas as pd
 import re
+import html
 import urllib.parse
 import asyncio
 import httpx
@@ -211,9 +214,23 @@ def extract_first_author(ref: str) -> str:
     m2 = re.match(r"^([A-ZÀ-ÖØ-Þ][^\s,]{0,60})", s, flags=re.UNICODE)
     return m2.group(1) if m2 else ""
 
+YEAR_TOKEN_RE = re.compile(
+    r"\b(?P<year>1[89]\d{2}|20\d{2})(?P<suffix>[a-z])?\b",
+    flags=re.I,
+)
+
+
 def extract_year(ref: str) -> str:
-    m = re.search(r"\b(?:1[89]\d{2}|20\d{2})[a-z]?\b", ref)
+    m = YEAR_TOKEN_RE.search(ref or "")
     return m.group(0) if m else ""
+
+
+def parse_year_token(value: str) -> tuple[int | None, str]:
+    """Return the numeric year and optional citation suffix from a year token."""
+    m = YEAR_TOKEN_RE.search(value or "")
+    if not m:
+        return None, ""
+    return int(m.group("year")), (m.group("suffix") or "").lower()
 
 def normalize_journal_name(name: str) -> str:
     name = (name or "").strip().lower()
@@ -255,9 +272,16 @@ def extract_title(ref: str) -> str:
     if not ref:
         return ""
 
-    m_q = re.search(r"[\'‘’]\s*([^\'‘’]{2,300}?)\s*[\'‘’]", ref)
-    if m_q:
-        return m_q.group(1).strip()
+    # Accept straight/curly single or double quotation marks. The look-ahead
+    # helps distinguish a closing quote from an apostrophe inside the title.
+    quote_patterns = [
+        r"['‘]\s*(.{2,300}?)\s*['’](?=\s*(?:[,.;]|[A-Z]))",
+        r'["“]\s*(.{2,300}?)\s*["”](?=\s*(?:[,.;]|[A-Z]))',
+    ]
+    for pattern in quote_patterns:
+        m_q = re.search(pattern, ref)
+        if m_q:
+            return m_q.group(1).strip()
 
     m = re.search(
         r"(?:\(\d{4}[a-z]?\)|[, ]\s*\d{4}[a-z]?)\.?\s+([^\.]{5,300})\.",
@@ -289,11 +313,14 @@ def clean_doi_value(raw: str) -> str:
     s = re.split(r"(?i)(?:\s|\(|%28)*(?:accessed|assessed)\b", s)[0]
 
     # Remove common trailing punctuation.
-    s = s.rstrip(".,;:]}>'\"")
+    # A trailing backslash commonly appears when references have passed
+    # through Markdown/CSV escaping. It is transport punctuation, not DOI
+    # content, and must not be sent to Crossref or doi.org.
+    s = s.rstrip(".,;:]}>'\"\\")
 
     # Remove a trailing unmatched closing bracket.
     while s.endswith(")") and s.count("(") < s.count(")"):
-        s = s[:-1].rstrip(".,;:")
+        s = s[:-1].rstrip(".,;:\\")
 
     return s
 
@@ -484,6 +511,55 @@ def title_similarity(a: str, b: str) -> float:
     b2 = re.sub(r"\s+", " ", (b or "").strip())
     return similar(a2, b2)
 
+
+def normalize_title_for_match(value: str) -> str:
+    """Normalize title text for conservative containment comparisons."""
+    text = html.unescape(str(value or ""))
+    text = strip_accents(text).casefold()
+    text = re.sub(r"[^\w]+", " ", text, flags=re.UNICODE)
+    return " ".join(text.split())
+
+
+def title_is_distinctive_enough(normalized_title: str) -> bool:
+    """Reject short/generic strings as containment evidence."""
+    words = normalized_title.split()
+    return len(normalized_title) >= 24 and len(words) >= 2
+
+
+def evaluate_title_match(
+    extracted_title: str,
+    metadata_title: str,
+    full_reference: str,
+    *,
+    similarity_threshold: float = 0.75,
+) -> tuple[bool, float, str, float]:
+    """Return title match, direct similarity, method, and confidence.
+
+    Direct similarity remains the first choice. If parsing shortened or
+    distorted the student title, a sufficiently distinctive trusted metadata
+    title may validate against the extracted title or the full reference.
+    """
+    direct_similarity = title_similarity(extracted_title, metadata_title)
+    if extracted_title and metadata_title and direct_similarity >= similarity_threshold:
+        return True, direct_similarity, "extracted-title similarity", direct_similarity
+
+    extracted_norm = normalize_title_for_match(extracted_title)
+    metadata_norm = normalize_title_for_match(metadata_title)
+    reference_norm = normalize_title_for_match(full_reference)
+
+    if title_is_distinctive_enough(metadata_norm):
+        if metadata_norm in extracted_norm:
+            return True, direct_similarity, "metadata title found in extracted title", 1.0
+        if metadata_norm in reference_norm:
+            return True, direct_similarity, "metadata title found in full reference", 1.0
+
+    if title_is_distinctive_enough(extracted_norm) and extracted_norm in metadata_norm:
+        coverage = len(extracted_norm) / max(1, len(metadata_norm))
+        if coverage >= 0.60:
+            return True, direct_similarity, "extracted title found in metadata title", max(0.90, coverage)
+
+    return False, direct_similarity, "no title match", direct_similarity
+
 # --- volume/issue/pages parsing & comparison ---
 
 def extract_vol_issue_pages(ref: str):
@@ -582,10 +658,37 @@ def split_references(text: str):
         return []
 
     text = normalise_broken_url_spacing(text)
-    lines = [strip_leading_list_marker(ln.strip()) for ln in re.split(r"\r?\n", text)]
 
     year_any = re.compile(r"\b(?:1[89]\d{2}|20\d{2})[a-z]?\b", re.I)
 
+    vancouver_author_body = (
+        r"[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ'’`\-]{1,80}"
+        r"(?:\s+[A-Za-zÀ-ÖØ-öø-ÿ'’`\-]{1,40}){0,3}"
+        r"\s+[A-Z][A-Z.\-]{0,8},"
+    )
+    vancouver_author = re.compile(rf"^{vancouver_author_body}", re.UNICODE)
+    bare_numbered_marker = re.compile(
+        rf"^\s*\d{{1,3}}\s+(?={vancouver_author_body})",
+        re.UNICODE,
+    )
+    inline_numbered_reference = re.compile(
+        rf"(?<=[.!?])\s+(?:\[\d{{1,3}}\]|\d{{1,3}}[.)]?)\s+"
+        rf"(?={vancouver_author_body})",
+        re.UNICODE,
+    )
+
+    # PDF text extraction can collapse a numbered Vancouver-style list into
+    # one paragraph: "...4106. 6 Strickler JH, ...". Insert a boundary only
+    # when terminal punctuation, a small list number, and an author pattern
+    # all agree. Volume, issue, year and page numbers do not meet this gate.
+    text = inline_numbered_reference.sub("\n", text)
+    raw_lines = re.split(r"\r\n?|\n", text)
+
+    personal_author = re.compile(
+        r"^[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ'’`\-]{1,80},\s*"
+        r"(?:[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ'’`\-]*|[A-Z](?:\.|\b))",
+        re.UNICODE,
+    )
     author_or_org_comma = re.compile(r"^[A-ZÀ-ÖØ-Þ][^,]{0,160},", re.UNICODE)
     entity_paren_year = re.compile(
         r"^[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ0-9&'`\-()./ ]+\(\s*(?:1[89]\d{2}|20\d{2})[a-z]?\s*\)",
@@ -598,33 +701,101 @@ def split_references(text: str):
 
     noise_line = re.compile(r"^(Available at|Accessed|\[Online\]|Online\.?)", re.I)
 
-    def looks_like_start(line: str) -> bool:
+    def looks_like_author_start(line: str) -> bool:
+        if personal_author.match(line) or vancouver_author.match(line):
+            return True
+        return bool(
+            re.match(
+                r"^(?:The\s+)?[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ0-9&'’`\-()./]+"
+                r"(?:\s+[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ0-9&'’`\-()./]+){0,10}",
+                line,
+                flags=re.UNICODE,
+            )
+        )
+
+    def looks_like_strong_start(line: str) -> bool:
         if not line:
             return False
         if noise_line.match(line):
             return False
         return bool(
-            (author_or_org_comma.match(line) and year_any.search(line))
+            ((personal_author.match(line) or vancouver_author.match(line)) and year_any.search(line))
             or entity_paren_year.match(line)
+        )
+
+    def looks_like_weak_start(line: str) -> bool:
+        if not line or noise_line.match(line):
+            return False
+        return bool(
+            (author_or_org_comma.match(line) and year_any.search(line))
             or entity_comma_year.match(line)
         )
 
-    refs = []
-    current = []
+    def looks_complete(ref: str) -> bool:
+        identifier_or_url = bool(
+            extract_doi(ref)
+            or extract_pmcid(ref)
+            or re.search(r"\bPMID:\s*\d+\b", ref, flags=re.I)
+            or extract_urls(ref)
+            or re.search(r"\b(?:Accessed|Assessed)(?: date)?\b", ref, flags=re.I)
+        )
+        if identifier_or_url:
+            return True
+        if not year_any.search(ref):
+            return False
+        return bool(
+            re.search(r"\bpp?\.\s*\d+", ref, flags=re.I)
+            or re.search(r"\b\d+\s*[-–—]\s*\d+\b", ref)
+            or re.search(r"\b\d+\s*\(\s*[A-Za-z0-9\-]+\s*\)", ref)
+        )
 
-    for line in lines:
-        if not line:
-            if current:
-                refs.append(" ".join(current).strip())
-                current = []
+    refs: list[str] = []
+    current: list[str] = []
+    blank_before = False
+
+    for raw_line in raw_lines:
+        stripped = raw_line.strip()
+        if not stripped:
+            blank_before = True
             continue
 
-        if looks_like_start(line):
-            if current:
-                refs.append(" ".join(current).strip())
+        standard_marker_match = LEADING_LIST_MARKER_RE.match(stripped)
+        bare_marker_match = bare_numbered_marker.match(stripped)
+        marker_match = standard_marker_match or bare_marker_match
+        line = (
+            stripped[bare_marker_match.end():].strip()
+            if bare_marker_match
+            else strip_leading_list_marker(stripped)
+        )
+        if not line:
+            blank_before = True
+            continue
+
+        current_text = " ".join(current).strip()
+        current_has_year = bool(year_any.search(current_text))
+        explicit_start = bool(marker_match and looks_like_author_start(line))
+        strong_start = looks_like_strong_start(line)
+        weak_start = looks_like_weak_start(line)
+
+        starts_new_reference = bool(
+            current
+            and (
+                explicit_start
+                or (strong_start and (current_has_year or blank_before))
+                or (weak_start and blank_before and looks_complete(current_text))
+                or (
+                    looks_like_author_start(line)
+                    and looks_complete(current_text)
+                )
+            )
+        )
+
+        if starts_new_reference:
+            refs.append(current_text)
             current = [line]
         else:
             current.append(line)
+        blank_before = False
 
     if current:
         refs.append(" ".join(current).strip())
@@ -640,7 +811,8 @@ def compute_weighted_score(*, doi_explicit_ok, doi_derived_ok, author_ok, title_
                            year_ok, journal_ok, vol_ok, issue_ok, pages_ok, shape_ok) -> int:
     score = 0
     if doi_explicit_ok: score += 4
-    if doi_derived_ok:  score += 2
+    # A derived DOI is a metadata-discovery aid, not evidence supplied by the
+    # student. Keep the flag for diagnostics but deliberately award no points.
     if author_ok:       score += 2
     if title_ok:        score += 2
     if year_ok:         score += 2
@@ -651,12 +823,30 @@ def compute_weighted_score(*, doi_explicit_ok, doi_derived_ok, author_ok, title_
     if shape_ok:        score += 1
     return score
 
+
+def collect_confirmed_metadata_conflicts(
+    field_checks: dict[str, tuple[bool, bool, bool]],
+) -> list[str]:
+    """Return fields where both sides supplied a value and comparison failed.
+
+    A missing student field or missing metadata field is deliberately not a
+    contradiction. This keeps incomplete-but-genuine references out of the
+    major-conflict rules and provides an extensible place for full-author-list
+    comparisons later.
+    """
+    return [
+        field
+        for field, (submitted_present, metadata_present, matches) in field_checks.items()
+        if submitted_present and metadata_present and not matches
+    ]
+
 def score_result(
     year_ok, author_ok, journal_ok, *,
     doi_explicit_ok=False, doi_derived_ok=False,
     ref="", shape_ok=False, has_url=False, had_crossref_candidate=False,
     title_ok=False, vol_ok=False, issue_ok=False, pages_ok=False,
-    doi_invalid=False, manual_review_web=False
+    doi_invalid=False, manual_review_web=False,
+    metadata_conflicts=None, strong_identity_match=False
 ):
     weighted_score = compute_weighted_score(
         doi_explicit_ok=doi_explicit_ok, doi_derived_ok=doi_derived_ok,
@@ -672,24 +862,52 @@ def score_result(
         label = "⚠ Suspicious" if minimally_ok else "❌ possible falsification"
         return label, "invalid DOI", weighted_score
 
-    if (doi_explicit_ok or doi_derived_ok) and (not author_ok) and (not title_ok):
+    if doi_explicit_ok and (not author_ok) and (not title_ok):
         return (
             "❌ possible falsification",
             "DOI resolves but both first-author and title mismatch (likely wrong DOI or fabricated pairing)",
             weighted_score
         )
 
-    if doi_explicit_ok or doi_derived_ok:
+    # Apply confirmed contradiction patterns before any rule based on the
+    # positive score. The identity gate prevents a loose Crossref candidate
+    # from making an unrelated student reference look falsified.
+    conflicts = list(metadata_conflicts or [])
+    # These rules apply when the DOI was discovered by the validator. A DOI
+    # explicitly supplied by the student remains governed by the separate DOI
+    # verification rules above/below; this avoids treating parser uncertainty
+    # in optional fields as stronger evidence than a verified identifier.
+    if (not doi_explicit_ok) and strong_identity_match and len(conflicts) >= 3:
+        return (
+            "❌ possible falsification",
+            "major metadata conflict: title and author identify the work, but "
+            + ", ".join(conflicts)
+            + " contradict the trusted record",
+            weighted_score,
+        )
+
+    if (not doi_explicit_ok) and strong_identity_match and len(conflicts) == 2:
+        return (
+            "⚠ Suspicious",
+            "multiple metadata conflicts: title and author identify the work, but "
+            + " and ".join(conflicts)
+            + " contradict the trusted record",
+            weighted_score,
+        )
+
+    if doi_explicit_ok:
         id_match = title_ok
         biblio_one = any([year_ok, journal_ok, vol_ok, issue_ok, pages_ok])
         if id_match and biblio_one:
             return "✅ Real", "", weighted_score
 
-    if (not doi_explicit_ok and not doi_derived_ok) and year_ok and author_ok and journal_ok:
+    # A discovered DOI can populate the comparison flags, but the reference
+    # must pass the ordinary DOI-less metadata rule to be marked Real.
+    if (not doi_explicit_ok) and year_ok and author_ok and journal_ok:
         return "✅ Real", "", weighted_score
 
     reasons = []
-    if not (doi_explicit_ok or doi_derived_ok): reasons.append("no DOI")
+    if not doi_explicit_ok: reasons.append("no DOI supplied")
     if not author_ok: reasons.append("author mismatch")
     if not title_ok: reasons.append("title mismatch")
     if not year_ok: reasons.append("year mismatch")
@@ -813,10 +1031,7 @@ def choose_best_crossref_item(ref, items, first_author, year, ref_journal, title
     best_score = -1
     reason = "no acceptable match"
 
-    try:
-        y_ref = int(year) if year else None
-    except Exception:
-        y_ref = None
+    y_ref, _ = parse_year_token(year)
 
     if y_ref is not None and y_ref <= 1990:
         tol = 1
@@ -859,6 +1074,7 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
     ref_clean = clean_ref(ref)
     first_author = extract_first_author(ref_clean)
     year = extract_year(ref_clean)
+    year_value, _ = parse_year_token(year)
     ref_journal = extract_journal(ref_clean).lower()
     title = extract_title(ref_clean)
     doi_val = extract_doi(ref)
@@ -881,6 +1097,11 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
 
     crossref_doi = crossref_journal = crossref_year = ""
     pubmed_id = pubmed_journal = pubmed_year = ""
+    metadata_title = ""
+    cr_vol = cr_issue = cr_pages = ""
+    title_similarity_score = 0.0
+    title_match_confidence = 0.0
+    title_match_method = "no metadata title"
 
     doi_ok = year_ok = author_ok = journal_ok = False
     title_ok = False
@@ -986,6 +1207,7 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
                 crossref_year = str(cr_year or "")
                 meta_authors = [a.get("family", "") for a in item.get("author", [])]
                 it_title = (item.get("title") or [""])[0]
+                metadata_title = it_title
 
             doi_ok = (resp.status_code == 200)
 
@@ -1015,19 +1237,31 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
                                 review_source = "PubMed publication types (via DOI)"
                                 review_notes = rnote + (f"; pubtypes={pubtypes[:6]}" if pubtypes else "")
 
-            doi_explicit_ok = bool(doi_ok and doi_org_ok)
-            doi_invalid = bool((not doi_ok) and (not doi_org_ok))
+            resolved_identifier = bool(doi_ok and doi_org_ok)
+            if doi_source == "heuristic":
+                doi_derived_ok = resolved_identifier
+                doi_explicit_ok = False
+            else:
+                doi_explicit_ok = resolved_identifier
+            doi_invalid = bool(
+                doi_source != "heuristic" and (not doi_ok) and (not doi_org_ok)
+            )
 
             if item:
-                if year and crossref_year.isdigit():
-                    y_ref, y_cr = int(year), int(crossref_year)
-                    tol = 1 if y_ref <= 1990 else 2
-                    year_ok = abs(y_cr - y_ref) <= tol
+                if year_value is not None and crossref_year.isdigit():
+                    y_cr = int(crossref_year)
+                    tol = 1 if year_value <= 1990 else 2
+                    year_ok = abs(y_cr - year_value) <= tol
 
                 author_ok = bool(first_author and any(surname_match(first_author, fam) for fam in meta_authors))
                 journal_ok = journals_match(ref_journal, crossref_journal)
-                title_sim = title_similarity(title, it_title)
-                title_ok = bool(title_sim >= (0.78 if (year and year.isdigit() and int(year) <= 1990) else 0.75))
+                title_threshold = 0.78 if (year_value is not None and year_value <= 1990) else 0.75
+                title_ok, title_similarity_score, title_match_method, title_match_confidence = evaluate_title_match(
+                    title,
+                    it_title,
+                    ref_clean,
+                    similarity_threshold=title_threshold,
+                )
 
                 cr_vol = str(item.get("volume") or "").strip()
                 cr_issue = str(item.get("issue") or (item.get("journal-issue", {}) or {}).get("issue") or "").strip()
@@ -1048,7 +1282,7 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
                 pubmed_journal = summary.get("fulljournalname", "")
                 pubmed_year = summary.get("pubdate", "")
                 m_year = re.search(r"\b(1[89]\d{2}|20\d{2})\b", str(pubmed_year))
-                year_ok = bool(year and m_year and year == m_year.group(1))
+                year_ok = bool(year_value is not None and m_year and year_value == int(m_year.group(1)))
 
                 authors_list = [a.get("name", "") for a in summary.get("authors", [])]
                 surname = (first_author.split()[0].lower() if first_author else "")
@@ -1081,7 +1315,7 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
                 pubmed_journal = summary.get("fulljournalname") or summary.get("source") or ""
                 pubmed_year = str(summary.get("pubdate") or summary.get("epubdate") or summary.get("sortpubdate") or "")
                 m_year = re.search(r"\b(1[89]\d{2}|20\d{2})\b", pubmed_year)
-                year_ok = bool(year and m_year and year == m_year.group(1))
+                year_ok = bool(year_value is not None and m_year and year_value == int(m_year.group(1)))
 
                 authors = summary.get("authors") or []
                 candidate_names = []
@@ -1142,6 +1376,7 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
                         crossref_year = str(iss or "")
                         meta_authors = [a.get("family", "") for a in item.get("author", [])]
                         it_title = (item.get("title") or [""])[0]
+                        metadata_title = it_title
 
                         if check_reviews and (not is_review):
                             if infer_review_from_title(it_title) or infer_review_from_title(title):
@@ -1157,13 +1392,18 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
                         doi_derived_ok = bool(crossref_doi and doi_org_ok)
                         doi_source = "derived" if crossref_doi and doi_source != "heuristic" else (doi_source or "")
 
-                        if year and crossref_year.isdigit():
-                            y_ref, y_cr = int(year), int(crossref_year)
-                            year_ok = abs(y_cr - y_ref) <= (1 if y_ref <= 1990 else 2)
+                        if year_value is not None and crossref_year.isdigit():
+                            y_cr = int(crossref_year)
+                            year_ok = abs(y_cr - year_value) <= (1 if year_value <= 1990 else 2)
                         author_ok = bool(first_author and any(surname_match(first_author, fam) for fam in meta_authors))
                         journal_ok = journals_match(ref_journal, crossref_journal)
-                        title_sim = title_similarity(title, it_title)
-                        title_ok = bool(title_sim >= (0.78 if (year and year.isdigit() and int(year) <= 1990) else 0.75))
+                        title_threshold = 0.78 if (year_value is not None and year_value <= 1990) else 0.75
+                        title_ok, title_similarity_score, title_match_method, title_match_confidence = evaluate_title_match(
+                            title,
+                            it_title,
+                            ref_clean,
+                            similarity_threshold=title_threshold,
+                        )
 
                         cr_vol = str(item.get("volume") or "").strip()
                         cr_issue = str(item.get("issue") or (item.get("journal-issue", {}) or {}).get("issue") or "").strip()
@@ -1200,6 +1440,7 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
                             crossref_year = str(iss or "")
                             meta_authors = [a.get("family", "") for a in item.get("author", [])]
                             it_title = (item.get("title") or [""])[0]
+                            metadata_title = it_title
 
                             if check_reviews and (not is_review) and (infer_review_from_title(it_title) or infer_review_from_title(title)):
                                 is_review = True
@@ -1214,13 +1455,18 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
                             doi_derived_ok = bool(crossref_doi and doi_org_ok)
                             doi_source = "derived" if crossref_doi and doi_source != "heuristic" else (doi_source or "")
 
-                            if year and crossref_year.isdigit():
-                                y_ref, y_cr = int(year), int(crossref_year)
-                                year_ok = abs(y_cr - y_ref) <= (1 if y_ref <= 1990 else 2)
+                            if year_value is not None and crossref_year.isdigit():
+                                y_cr = int(crossref_year)
+                                year_ok = abs(y_cr - year_value) <= (1 if year_value <= 1990 else 2)
                             author_ok = bool(first_author and any(surname_match(first_author, fam) for fam in meta_authors))
                             journal_ok = journals_match(ref_journal, crossref_journal)
-                            title_sim = title_similarity(title, it_title)
-                            title_ok = bool(title_sim >= (0.78 if (year and year.isdigit() and int(year) <= 1990) else 0.75))
+                            title_threshold = 0.78 if (year_value is not None and year_value <= 1990) else 0.75
+                            title_ok, title_similarity_score, title_match_method, title_match_confidence = evaluate_title_match(
+                                title,
+                                it_title,
+                                ref_clean,
+                                similarity_threshold=title_threshold,
+                            )
 
                             cr_vol = str(item.get("volume") or "").strip()
                             cr_issue = str(item.get("issue") or (item.get("journal-issue", {}) or {}).get("issue") or "").strip()
@@ -1262,6 +1508,21 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
             "doi_derived_ok": doi_derived_ok,
         }
 
+    metadata_year_value, _ = parse_year_token(crossref_year or pubmed_year)
+    metadata_journal = crossref_journal or pubmed_journal
+    metadata_conflicts = collect_confirmed_metadata_conflicts(
+        {
+            "year": (year_value is not None, metadata_year_value is not None, year_ok),
+            "journal": (bool(ref_journal), bool(metadata_journal), journal_ok),
+            "volume": (bool(ref_vol), bool(cr_vol), vol_ok),
+            "issue": (bool(ref_issue), bool(cr_issue), issue_ok),
+            "pages": (bool(ref_pages or ref_pstart or ref_pend), bool(cr_pages), pages_ok),
+        }
+    )
+    strong_identity_match = bool(
+        author_ok and metadata_title and title_ok and title_match_confidence >= 0.90
+    )
+
     result, reason, weighted_score = score_result(
         year_ok, author_ok, journal_ok,
         doi_explicit_ok=doi_explicit_ok,
@@ -1275,14 +1536,23 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
         issue_ok=issue_ok,
         pages_ok=pages_ok,
         doi_invalid=doi_invalid,
-        manual_review_web=manual_review_web
+        manual_review_web=manual_review_web,
+        metadata_conflicts=metadata_conflicts,
+        strong_identity_match=strong_identity_match,
     )
 
     if doi_invalid:
         reason = (reason + ("; " if reason else "") + "DOI present but invalid (no Crossref and no doi.org resolution)").strip("; ")
 
-    if doi_val and not doi_explicit_ok and not doi_invalid:
+    if doi_val and not doi_explicit_ok and not doi_derived_ok and not doi_invalid:
         reason = (reason + ("; " if reason else "") + "DOI present but doi.org did not resolve/redirect").strip("; ")
+
+    if doi_derived_ok:
+        reason = (
+            reason
+            + ("; " if reason else "")
+            + "derived DOI used for metadata only; no DOI points awarded"
+        ).strip("; ")
 
     if doi_explicit_ok and result != "✅ Real":
         reason = (reason + ("; " if reason else "") +
@@ -1330,6 +1600,16 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
         "Domains": domains_joined,
         "doi_explicit_ok": doi_explicit_ok,
         "doi_derived_ok": doi_derived_ok,
+        "title_ok": title_ok,
+        "title_similarity": round(title_similarity_score, 3),
+        "title_match_confidence": round(title_match_confidence, 3),
+        "title_match_method": title_match_method,
+        "strong_identity_match": strong_identity_match,
+        "vol_ok": vol_ok,
+        "issue_ok": issue_ok,
+        "pages_ok": pages_ok,
+        "metadata_conflict_count": len(metadata_conflicts),
+        "metadata_conflicts": ", ".join(metadata_conflicts),
         "Is Review": bool(is_review) if check_reviews else False,
         "Review Source": review_source if check_reviews else "",
         "Review Notes": review_notes if check_reviews else "",
@@ -1378,7 +1658,12 @@ def build_excel_workbook(
             "PubMed ID", "PubMed Journal", "PubMed Year", "Notes"
         ]
 
-        debug_order = ["doi_explicit_ok", "doi_derived_ok", "year_ok", "author_ok", "journal_ok"]
+        debug_order = [
+            "doi_explicit_ok", "doi_derived_ok", "year_ok", "author_ok", "journal_ok",
+            "title_ok", "title_similarity", "title_match_confidence", "title_match_method",
+            "strong_identity_match", "vol_ok", "issue_ok", "pages_ok", "metadata_conflict_count",
+            "metadata_conflicts",
+        ]
         desired = base_order + (debug_order if debug_mode else [])
         cols = [c for c in desired if c in export_df.columns]
         main = export_df[cols].copy()
@@ -1585,7 +1870,7 @@ if "sid" not in st.session_state:
 st.write(
     """
     Validates references via DOI / PubMed / Crossref and classifies results:
-    - ✅ Real → DOI verified with resolver + bibliographic match; OR Crossref-derived DOI verified at doi.org + match; OR PMCID/PMID verification
+    - ✅ Real → student-supplied DOI verified with matching metadata; OR DOI-less metadata checks pass; OR PMCID/PMID verification
     - 🟡 Manual review – web source / report / dataset → organisational or dataset/report-style web source with URL
     - 📄 Web Source (trusted) / 📄 Web Source → general website/URL
     - ⚠ Suspicious → partial mismatch or unverifiable but well-formed
@@ -1614,7 +1899,29 @@ The score helps show how strong the match is, but the score alone does **not** m
 **❌ Possible falsification**
 - A DOI is present but does not work and the rest of the reference is weak, or
 - The DOI works but **both** the author and title do not match, or
+- A strong title-and-author match identifies a work, but **three or more supplied bibliographic fields** contradict its trusted record, or
 - The reference fails most checks and does not look reliable
+
+**Conflict rules run before the score**
+- They apply when the validator discovers the candidate work rather than relying on a DOI supplied by the student
+- Missing values are not counted as contradictions
+- Two confirmed conflicts produce **⚠ Suspicious**
+- Three or more confirmed conflicts produce **❌ Possible falsification**
+- These rules currently compare year, journal, volume, issue and pages; the structure can also accept full-author-list conflicts later
+""")
+
+with st.expander("How titles are checked"):
+    st.markdown("""
+The validator first compares the title extracted from the student reference with the trusted metadata title.
+
+If punctuation or formatting caused a poor extraction, it then checks whether a sufficiently distinctive trusted title appears:
+
+- inside the extracted student title, or
+- anywhere in the complete student reference
+
+Short generic titles are not allowed to pass through this fallback. The result records the title-match method and confidence for inspection.
+
+Titles may be enclosed in straight or curly single or double quotation marks.
 """)
 
 with st.expander("How the score is calculated"):
@@ -1623,9 +1930,9 @@ The score is a simple guide that shows how many parts of the reference match tru
 
 **Points**
 - **4 points** for a DOI given in the reference that works
-- **2 points** for a DOI found from other checks that works
+- **0 points** for a DOI derived by the validator; it is used only to retrieve metadata
 - **2 points** if the author matches
-- **2 points** if the title matches
+- **2 points** if the title matches directly or through the guarded title back-validation check
 - **2 points** if the year matches
 - **1 point** if the journal matches
 - **1 point** if the volume matches
@@ -1633,13 +1940,13 @@ The score is a simple guide that shows how many parts of the reference match tru
 - **1 point** if the pages match
 - **1 point** if the reference is in a believable format
 
-**Maximum score: 17**
+**Maximum score: 15**
 
 **How to read the score**
 - **0 to 3**: very weak match
 - **4 to 7**: limited match, usually needs caution
 - **8 to 11**: moderate match, may look plausible but still not confirmed
-- **12 to 17**: strong match
+- **12 to 15**: strong match
 
 **Important**
 A higher score means the reference looks stronger, but the score does **not** decide the final label on its own.
@@ -1760,8 +2067,7 @@ def compute_doi_score(row: pd.Series) -> int:
     """
     Simple numeric DOI score for the condensed table:
       2 = explicit DOI hard-resolved (Crossref + doi.org)
-      1 = derived DOI resolved at doi.org
-      0 = no usable DOI
+      0 = no student-supplied usable DOI (including a resolved derived DOI)
      -1 = DOI present but invalid (no Crossref and no doi.org)
     """
     extracted = str(row.get("Extracted DOI", "") or "").strip()
@@ -1772,7 +2078,7 @@ def compute_doi_score(row: pd.Series) -> int:
     if bool(row.get("doi_explicit_ok", False)):
         return 2
     if bool(row.get("doi_derived_ok", False)):
-        return 1
+        return 0
 
     notes = str(row.get("Notes", "") or "").lower()
     if doi_present and "invalid doi" in notes:
