@@ -9,6 +9,12 @@ Links carrying `utm_source=chatgpt.com` are marked in the **AI URL flag** and
 **AL notes** fields. This is an advisory provenance signal and does not change
 the validation result or score.
 
+Author validation compares every explicitly supplied surname with trusted
+metadata. Complete lists use bidirectional coverage, while `et al.` references
+check each author named before `et al.`. Confirmed co-author conflicts are shown
+in the result diagnostics and prevent an explicit DOI reference being marked
+Real automatically.
+
 ## Run locally
 
 1. Create a virtual environment and install dependencies:
