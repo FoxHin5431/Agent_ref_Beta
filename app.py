@@ -308,6 +308,11 @@ def clean_doi_value(raw: str) -> str:
     s = re.sub(r"^https?://(?:dx\.)?doi\.org/", "", s, flags=re.I)
     s = re.sub(r"^doi:\s*", "", s, flags=re.I)
 
+    # URL query strings and fragments are transport metadata, not part of the
+    # DOI. This is especially important for links carrying AI/marketing UTM
+    # parameters, which would otherwise be sent to Crossref as part of the DOI.
+    s = re.split(r"[?#]", s, maxsplit=1)[0]
+
     # Stop before access-date text, including cases where spacing has already collapsed:
     # 10.7326/M14-0737(Assessed24April2026)
     s = re.split(r"(?i)(?:\s|\(|%28)*(?:accessed|assessed)\b", s)[0]
@@ -394,27 +399,49 @@ def extract_primary_url(ref: str) -> str:
 
 def has_chatgpt_utm_source(ref: str) -> bool:
     """
-    Flags URLs that contain utm_source=chatgpt, including encoded or
-    differently-cased variants.
+    Flag URLs whose utm_source identifies ChatGPT.
+
+    Handles case differences, HTML-escaped query separators, and one or more
+    layers of percent encoding while avoiding unrelated UTM sources.
     """
     if not ref:
         return False
 
-    if re.search(r"(?i)(?:[?&]|%3[fF]|%26)utm_source\s*=\s*chatgpt\b", ref):
-        return True
+    def is_chatgpt_value(value: object) -> bool:
+        normalised = urllib.parse.unquote_plus(str(value or ""))
+        normalised = html.unescape(normalised).strip().casefold().rstrip("/")
+        return normalised in {"chatgpt", "chatgpt.com", "www.chatgpt.com"}
 
-    for url in extract_urls(ref):
-        try:
-            parsed = urllib.parse.urlparse(url)
-            query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
-            if any(
-                key.lower() == "utm_source"
-                and any(str(value).lower().startswith("chatgpt") for value in values)
-                for key, values in query.items()
-            ):
+    candidates = []
+    candidate = normalise_broken_url_spacing(str(ref))
+    for _ in range(3):
+        candidate = html.unescape(candidate)
+        if candidate not in candidates:
+            candidates.append(candidate)
+        decoded = urllib.parse.unquote_plus(candidate)
+        if decoded == candidate:
+            break
+        candidate = decoded
+
+    for candidate in candidates:
+        for match in re.finditer(
+            r"(?i)(?:[?&])utm_source\s*=\s*([^&#\s)\]]+)",
+            candidate,
+        ):
+            if is_chatgpt_value(match.group(1).rstrip(".,;")):
                 return True
-        except Exception:
-            continue
+
+        for url in extract_urls(candidate):
+            try:
+                parsed = urllib.parse.urlparse(url)
+                for key, value in urllib.parse.parse_qsl(
+                    parsed.query,
+                    keep_blank_values=True,
+                ):
+                    if key.strip().casefold() == "utm_source" and is_chatgpt_value(value):
+                        return True
+            except (TypeError, ValueError):
+                continue
 
     return False
     
