@@ -207,17 +207,131 @@ def clean_ref(ref: str) -> str:
 
 
 def extract_first_author(ref: str) -> str:
-    s = ref.lstrip(" \"'“”‘’")
-    m = re.match(r"^([A-ZÀ-ÖØ-Þ][^,]{0,120}),", s, flags=re.UNICODE)
-    if m:
-        return m.group(1).strip()
-    m2 = re.match(r"^([A-ZÀ-ÖØ-Þ][^\s,]{0,60})", s, flags=re.UNICODE)
-    return m2.group(1) if m2 else ""
+    authors = extract_author_surnames(ref)
+    return authors[0] if authors else ""
 
 YEAR_TOKEN_RE = re.compile(
     r"\b(?P<year>1[89]\d{2}|20\d{2})(?P<suffix>[a-z])?\b",
     flags=re.I,
 )
+
+ET_AL_RE = re.compile(r"\bet\s+al\.?\b", flags=re.I)
+
+
+def reference_uses_et_al(ref: str) -> bool:
+    return bool(ET_AL_RE.search(ref or ""))
+
+
+def extract_author_surnames(ref: str) -> list[str]:
+    """Extract every explicitly supplied author surname before the title/year.
+
+    The parser covers surname-first Harvard forms, initial-based Vancouver
+    forms, a final given-name-first author, and organisational authors. It does
+    not invent the omitted names represented by ``et al.``.
+    """
+    text = strip_leading_list_marker(ref or "").lstrip(" \"'“”‘’")
+    if not text:
+        return []
+
+    boundaries = []
+    year_match = YEAR_TOKEN_RE.search(text)
+    if year_match:
+        boundaries.append(year_match.start())
+    quote_positions = [
+        position
+        for marker in ("‘", "'", "“", '"')
+        if (position := text.find(marker, 1)) >= 0
+    ]
+    if quote_positions:
+        boundaries.append(min(quote_positions))
+
+    et_al_match = ET_AL_RE.search(text)
+    if et_al_match:
+        boundaries.append(et_al_match.end())
+
+    prefix = text[: min(boundaries)] if boundaries else text[:350]
+    prefix = prefix.strip(" ,.;:()[]")
+    if not prefix:
+        return []
+
+    leading_organisation = text.split(".", 1)[0].strip(" ,.;:()[]")
+    if not year_match and len(leading_organisation.split()) >= 2 and re.search(
+        r"\b(?:university|organisation|organization|service|institute|agency|"
+        r"department|ministry|council|centers?|nhs|unicef|who)\b",
+        leading_organisation,
+        flags=re.I,
+    ):
+        return [leading_organisation]
+
+    name_word = r"[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ'’`\-]+"
+    family_name = (
+        rf"(?:(?:[Dd]e|[Dd]el|[Dd]er|[Dd]i|[Dd]a|[Dd]os|[Dd]u|"
+        rf"[Vv]an|[Vv]on|[Ll]a|[Ll]e)\s+){{0,3}}{name_word}"
+    )
+    surnames: list[str] = []
+
+    # Surname-first forms: ``Paisley, M.F.`` or ``Stern, Claudio D``.
+    for match in re.finditer(
+        rf"(?:^|,\s*|\band\s+|&\s+)({family_name})"
+        rf"\s*,\s*(?=[A-ZÀ-ÖØ-Þ])",
+        prefix,
+        flags=re.UNICODE,
+    ):
+        surnames.append(match.group(1).strip())
+
+    # Vancouver forms: ``Bekaii-Saab TS, Yaeger R, Spira AI``.
+    leading_full_given_names = bool(
+        re.match(rf"^{name_word},\s*{name_word}(?:\s+[A-Z]\.?)?\s*,", prefix)
+    )
+    first_comma_position = prefix.find(",")
+    for match in re.finditer(
+        rf"(?:^|,\s*|\band\s+|&\s+)({name_word})\s+"
+        r"(?:[A-Z](?:[A-Z.\-]{0,8}))(?=\s*(?:,|\band\b|&|\bet\s+al\b|\.))",
+        prefix,
+        flags=re.UNICODE,
+    ):
+        if leading_full_given_names and match.start() == first_comma_position:
+            continue
+        surnames.append(match.group(1).strip())
+
+    # A final given-name-first author: ``and Agnieszka M Piatkowska``.
+    final_given_first = re.search(
+        rf"(?:\band\s+|&\s+)(?:{name_word}\s+)+(?:[A-Z]\.?\s+)*({name_word})\s*\.?$",
+        prefix,
+        flags=re.UNICODE,
+    )
+    if final_given_first:
+        surnames.append(final_given_first.group(1).strip())
+
+    supplied = [
+        surname
+        for surname in surnames
+        if strip_accents(surname).casefold() not in {"", "et", "al"}
+    ]
+
+    # Repeated surnames can represent different co-authors (for example,
+    # ``Kim, J., Kim, H. and Bang, D.``), so order and duplicates are retained.
+    if supplied:
+        return supplied
+
+    # Organisational author before an early year, e.g. ``The Open University``.
+    if year_match and year_match.start() <= 160:
+        organisation = text[: year_match.start()].strip(" ,.;:()[]")
+        if organisation and not re.search(r"\b(?:vol|volume|journal|pp?)\.?\b", organisation, re.I):
+            return [organisation]
+
+    organisation = leading_organisation
+    if len(organisation.split()) >= 2 and re.search(
+        r"\b(?:university|organisation|organization|service|institute|agency|"
+        r"department|ministry|council|centers?|nhs|unicef|who)\b",
+        organisation,
+        flags=re.I,
+    ):
+        return [organisation]
+
+    # Conservative compatibility fallback for an unrecognised personal style.
+    fallback = re.match(rf"^({name_word})", text, flags=re.UNICODE)
+    return [fallback.group(1)] if fallback else []
 
 
 def extract_year(ref: str) -> str:
@@ -479,7 +593,7 @@ def journals_match(ref_journal, meta_journal):
 def has_bibliographic_shape(ref: str) -> bool:
     if not re.search(r"\b(?:1[89]\d{2}|20\d{2})[a-z]?\b", ref):
         return False
-    pages = re.search(r"\bpp?\.\s*\d+", ref, flags=re.I)
+    pages = re.search(r"\bpp?\.\s*(?:\d+|[A-Z]{1,5}\d{3,})\b", ref, flags=re.I)
     vol_issue = re.search(r"\b\d+\s*\(\d+\)", ref)
     page_range = re.search(r"\b\d+\s*[-–]\s*\d+\b", ref)
     return bool(pages or vol_issue or page_range)
@@ -526,12 +640,175 @@ def strip_accents(s: str) -> str:
         return s
     return "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
 
-def surname_match(first_author: str, family: str) -> bool:
-    if not first_author or not family:
+def normalize_author_name(value: str) -> str:
+    value = html.unescape(str(value or ""))
+    value = strip_accents(value).casefold()
+    return re.sub(r"[^a-z0-9]+", "", value)
+
+
+def surname_match(submitted_surname: str, metadata_surname: str) -> bool:
+    if not submitted_surname or not metadata_surname:
         return False
-    s = strip_accents(first_author.split()[0]).lower()
-    f = strip_accents(family).lower()
-    return f.startswith(s[:5]) or similar(s, f) >= 0.8
+    submitted = normalize_author_name(submitted_surname)
+    metadata = normalize_author_name(metadata_surname)
+    if not submitted or not metadata:
+        return False
+    if submitted == metadata:
+        return True
+    if min(len(submitted), len(metadata)) >= 5 and (
+        submitted.startswith(metadata) or metadata.startswith(submitted)
+    ):
+        return True
+    return similar(submitted, metadata) >= 0.84
+
+
+def metadata_author_surnames(authors: object) -> list[str]:
+    """Return comparable surnames from Crossref or PubMed author objects."""
+    out = []
+    for author in authors or []:
+        value = ""
+        if isinstance(author, dict):
+            value = str(
+                author.get("family")
+                or author.get("last")
+                or author.get("name")
+                or ""
+            ).strip()
+        else:
+            value = str(author or "").strip()
+
+        if not value:
+            continue
+        if re.search(
+            r"\b(?:on behalf of|consortium|collaborative group|study group|staff editors?)\b",
+            value,
+            flags=re.I,
+        ):
+            # Collective credits are useful metadata but are not an omitted
+            # personal co-author in the student's author list.
+            continue
+        if "," in value:
+            value = value.split(",", 1)[0].strip()
+        elif re.search(r"\s+[A-Z][A-Z.\-]*$", value):
+            # PubMed normally returns ``Surname AB``.
+            value = value.rsplit(" ", 1)[0].strip()
+        out.append(value)
+    return out
+
+
+def compare_author_lists(
+    submitted_authors: list[str],
+    metadata_authors: list[str],
+    *,
+    uses_et_al: bool = False,
+) -> dict:
+    """Compare all explicitly supplied authors with trusted metadata.
+
+    Complete lists need at least 80% coverage in both directions. With
+    ``et al.``, each explicitly named author must match the corresponding
+    leading metadata author, while omitted names are deliberately ignored.
+    """
+    submitted = [a for a in submitted_authors if normalize_author_name(a)]
+    metadata = [a for a in metadata_authors if normalize_author_name(a)]
+    result = {
+        "ok": False,
+        "method": "not checked",
+        "matched_count": 0,
+        "submitted_count": len(submitted),
+        "metadata_count": len(metadata),
+        "submitted_coverage": 0.0,
+        "metadata_coverage": 0.0,
+        "first_author_ok": False,
+    }
+    if not submitted:
+        result["method"] = "no submitted authors extracted"
+        return result
+    if not metadata:
+        result["method"] = "no metadata authors"
+        return result
+
+    result["first_author_ok"] = surname_match(submitted[0], metadata[0])
+
+    if uses_et_al:
+        matched = sum(
+            1
+            for submitted_name, metadata_name in zip(submitted, metadata)
+            if surname_match(submitted_name, metadata_name)
+        )
+        result["matched_count"] = matched
+        result["submitted_coverage"] = matched / len(submitted)
+        result["metadata_coverage"] = matched / len(metadata)
+        result["ok"] = bool(
+            result["first_author_ok"]
+            and matched == len(submitted)
+            and len(metadata) >= len(submitted)
+        )
+        result["method"] = "et al. named-author prefix" if result["ok"] else "et al. author mismatch"
+        return result
+
+    unmatched_metadata = set(range(len(metadata)))
+    matched = 0
+    for submitted_name in submitted:
+        match_index = next(
+            (
+                index
+                for index in unmatched_metadata
+                if surname_match(submitted_name, metadata[index])
+            ),
+            None,
+        )
+        if match_index is not None:
+            unmatched_metadata.remove(match_index)
+            matched += 1
+
+    submitted_coverage = matched / len(submitted)
+    metadata_coverage = matched / len(metadata)
+    result.update(
+        {
+            "matched_count": matched,
+            "submitted_coverage": submitted_coverage,
+            "metadata_coverage": metadata_coverage,
+        }
+    )
+
+    if len(submitted) == len(metadata) == 1:
+        result["ok"] = result["first_author_ok"]
+        result["method"] = "single author" if result["ok"] else "single-author mismatch"
+        return result
+
+    result["ok"] = bool(
+        result["first_author_ok"]
+        and submitted_coverage >= 0.8
+        and metadata_coverage >= 0.8
+    )
+    result["method"] = "full author list" if result["ok"] else "full-list mismatch"
+    return result
+
+
+def author_comparison_fields(
+    submitted_authors: list[str],
+    metadata_authors: list[str],
+    *,
+    uses_et_al: bool,
+    comparison: dict | None = None,
+) -> dict:
+    comparison = comparison or compare_author_lists(
+        submitted_authors,
+        metadata_authors,
+        uses_et_al=uses_et_al,
+    )
+    return {
+        "Extracted Authors": ", ".join(submitted_authors),
+        "Metadata Authors": ", ".join(metadata_authors),
+        "Uses et al.": bool(uses_et_al),
+        "Author match method": comparison["method"],
+        "Author match count": int(comparison["matched_count"]),
+        "Submitted author count": int(comparison["submitted_count"]),
+        "Metadata author count": int(comparison["metadata_count"]),
+        "Author submitted coverage": round(comparison["submitted_coverage"], 3),
+        "Author metadata coverage": round(comparison["metadata_coverage"], 3),
+        "First author matches": bool(comparison["first_author_ok"]),
+    }
 
 def title_similarity(a: str, b: str) -> float:
     a2 = re.sub(r"\s+", " ", (a or "").strip())
@@ -873,7 +1150,8 @@ def score_result(
     ref="", shape_ok=False, has_url=False, had_crossref_candidate=False,
     title_ok=False, vol_ok=False, issue_ok=False, pages_ok=False,
     doi_invalid=False, manual_review_web=False,
-    metadata_conflicts=None, strong_identity_match=False
+    metadata_conflicts=None, strong_identity_match=False,
+    author_conflict=False,
 ):
     weighted_score = compute_weighted_score(
         doi_explicit_ok=doi_explicit_ok, doi_derived_ok=doi_derived_ok,
@@ -889,11 +1167,19 @@ def score_result(
         label = "⚠ Suspicious" if minimally_ok else "❌ possible falsification"
         return label, "invalid DOI", weighted_score
 
-    if doi_explicit_ok and (not author_ok) and (not title_ok):
+    if doi_explicit_ok and author_conflict and (not title_ok):
         return (
             "❌ possible falsification",
-            "DOI resolves but both first-author and title mismatch (likely wrong DOI or fabricated pairing)",
+            "DOI resolves but both the submitted author list and title mismatch "
+            "(likely wrong DOI or fabricated pairing)",
             weighted_score
+        )
+
+    if doi_explicit_ok and author_conflict:
+        return (
+            "⚠ Suspicious",
+            "DOI resolves but the submitted author list conflicts with trusted metadata",
+            weighted_score,
         )
 
     # Apply confirmed contradiction patterns before any rule based on the
@@ -1035,7 +1321,16 @@ async def check_doi_org_head(client, doi_val: str) -> bool:
 # Strict Crossref chooser
 # =========================
 
-def choose_best_crossref_item(ref, items, first_author, year, ref_journal, title):
+def choose_best_crossref_item(
+    ref,
+    items,
+    first_author,
+    year,
+    ref_journal,
+    title,
+    submitted_authors=None,
+    submitted_uses_et_al=False,
+):
     def get_year(it):
         for path in (("issued", "date-parts"), ("published-print", "date-parts"), ("created", "date-parts")):
             obj = it
@@ -1071,11 +1366,18 @@ def choose_best_crossref_item(ref, items, first_author, year, ref_journal, title
         it_title = get_title(it)
         it_year = get_year(it)
         it_jnl = (it.get("container-title") or [""])[0]
-        fams = [a.get("family", "") for a in it.get("author", [])]
+        fams = metadata_author_surnames(it.get("author", []))
 
         title_sim = similar(title, it_title) if (title and it_title) else 0.0
         year_ok = bool(y_ref is not None and it_year is not None and abs(it_year - y_ref) <= tol)
-        auth_ok = bool(first_author and any(surname_match(first_author, f) for f in fams))
+        if submitted_authors:
+            auth_ok = compare_author_lists(
+                submitted_authors,
+                fams,
+                uses_et_al=submitted_uses_et_al,
+            )["ok"]
+        else:
+            auth_ok = bool(first_author and any(surname_match(first_author, f) for f in fams))
         jnl_ok = journals_match(ref_journal, it_jnl)
 
         passes = (title_sim >= title_threshold and year_ok) or (auth_ok and year_ok)
@@ -1099,7 +1401,9 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
     ref = normalise_broken_url_spacing(ref)
 
     ref_clean = clean_ref(ref)
-    first_author = extract_first_author(ref_clean)
+    submitted_authors = extract_author_surnames(ref_clean)
+    submitted_uses_et_al = reference_uses_et_al(ref_clean)
+    first_author = submitted_authors[0] if submitted_authors else ""
     year = extract_year(ref_clean)
     year_value, _ = parse_year_token(year)
     ref_journal = extract_journal(ref_clean).lower()
@@ -1129,6 +1433,13 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
     title_similarity_score = 0.0
     title_match_confidence = 0.0
     title_match_method = "no metadata title"
+
+    metadata_authors = []
+    author_comparison = compare_author_lists(
+        submitted_authors,
+        metadata_authors,
+        uses_et_al=submitted_uses_et_al,
+    )
 
     doi_ok = year_ok = author_ok = journal_ok = False
     title_ok = False
@@ -1166,6 +1477,12 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
             "doi_ok": False,
             "year_ok": bool(year),
             "author_ok": bool(first_author),
+            **author_comparison_fields(
+                submitted_authors,
+                metadata_authors,
+                uses_et_al=submitted_uses_et_al,
+                comparison=author_comparison,
+            ),
             "journal_ok": False,
             "Validation Result": MANUAL_REVIEW_LABEL,
             "Raw Result": MANUAL_REVIEW_LABEL,
@@ -1198,6 +1515,12 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
             "doi_ok": False,
             "year_ok": bool(year),
             "author_ok": bool(first_author),
+            **author_comparison_fields(
+                submitted_authors,
+                metadata_authors,
+                uses_et_al=submitted_uses_et_al,
+                comparison=author_comparison,
+            ),
             "journal_ok": False,
             "Validation Result": label,
             "Raw Result": label,
@@ -1220,7 +1543,6 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
             doi_org_ok = await check_doi_org_head(client, doi_val)
 
             item = {}
-            meta_authors = []
             it_title = ""
 
             if resp.status_code == 200:
@@ -1232,7 +1554,7 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
                     or item.get("created", {}).get("date-parts", [[None]])[0][0]
                 )
                 crossref_year = str(cr_year or "")
-                meta_authors = [a.get("family", "") for a in item.get("author", [])]
+                metadata_authors = metadata_author_surnames(item.get("author", []))
                 it_title = (item.get("title") or [""])[0]
                 metadata_title = it_title
 
@@ -1280,7 +1602,12 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
                     tol = 1 if year_value <= 1990 else 2
                     year_ok = abs(y_cr - year_value) <= tol
 
-                author_ok = bool(first_author and any(surname_match(first_author, fam) for fam in meta_authors))
+                author_comparison = compare_author_lists(
+                    submitted_authors,
+                    metadata_authors,
+                    uses_et_al=submitted_uses_et_al,
+                )
+                author_ok = author_comparison["ok"]
                 journal_ok = journals_match(ref_journal, crossref_journal)
                 title_threshold = 0.78 if (year_value is not None and year_value <= 1990) else 0.75
                 title_ok, title_similarity_score, title_match_method, title_match_confidence = evaluate_title_match(
@@ -1311,15 +1638,13 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
                 m_year = re.search(r"\b(1[89]\d{2}|20\d{2})\b", str(pubmed_year))
                 year_ok = bool(year_value is not None and m_year and year_value == int(m_year.group(1)))
 
-                authors_list = [a.get("name", "") for a in summary.get("authors", [])]
-                surname = (first_author.split()[0].lower() if first_author else "")
-                author_ok = bool(
-                    surname and any(
-                        n.lower().split(",")[0].startswith(strip_accents(surname)[:5]) or
-                        similar(strip_accents(surname), strip_accents(n.lower().split(",")[0])) >= 0.8
-                        for n in authors_list
-                    )
+                metadata_authors = metadata_author_surnames(summary.get("authors", []))
+                author_comparison = compare_author_lists(
+                    submitted_authors,
+                    metadata_authors,
+                    uses_et_al=submitted_uses_et_al,
                 )
+                author_ok = author_comparison["ok"]
                 journal_ok = journals_match(ref_journal, pubmed_journal)
                 if check_reviews:
                     resp_xml = await fetch_pubmed_efetch_xml(client, pmid_val)
@@ -1344,23 +1669,13 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
                 m_year = re.search(r"\b(1[89]\d{2}|20\d{2})\b", pubmed_year)
                 year_ok = bool(year_value is not None and m_year and year_value == int(m_year.group(1)))
 
-                authors = summary.get("authors") or []
-                candidate_names = []
-                for a in authors:
-                    if isinstance(a, dict):
-                        if "name" in a and a["name"]:
-                            candidate_names.append(a["name"])
-                        elif "last" in a and a["last"]:
-                            candidate_names.append(a["last"])
-
-                surname = (first_author.split()[0].lower() if first_author else "")
-                author_ok = bool(
-                    surname and any(
-                        (str(n).lower().split(",")[0]).startswith(strip_accents(surname)[:5]) or
-                        similar(strip_accents(surname), strip_accents(str(n).lower().split(",")[0])) >= 0.8
-                        for n in candidate_names
-                    )
+                metadata_authors = metadata_author_surnames(summary.get("authors") or [])
+                author_comparison = compare_author_lists(
+                    submitted_authors,
+                    metadata_authors,
+                    uses_et_al=submitted_uses_et_al,
                 )
+                author_ok = author_comparison["ok"]
                 journal_ok = journals_match(ref_journal, pubmed_journal)
                 pubmed_id = pmcid_val
 
@@ -1394,14 +1709,23 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
                 items = resp.json().get("message", {}).get("items", [])
                 if items:
                     had_crossref_candidate = True
-                    first_pass_item, why = choose_best_crossref_item(ref_clean, items, first_author, year, ref_journal, title)
+                    first_pass_item, why = choose_best_crossref_item(
+                        ref_clean,
+                        items,
+                        first_author,
+                        year,
+                        ref_journal,
+                        title,
+                        submitted_authors=submitted_authors,
+                        submitted_uses_et_al=submitted_uses_et_al,
+                    )
                     if first_pass_item:
                         item = first_pass_item
                         crossref_doi = item.get("DOI", "") or ""
                         crossref_journal = (item.get("container-title") or [""])[0]
                         iss = item.get("issued", {}).get("date-parts", [[None]])[0][0]
                         crossref_year = str(iss or "")
-                        meta_authors = [a.get("family", "") for a in item.get("author", [])]
+                        metadata_authors = metadata_author_surnames(item.get("author", []))
                         it_title = (item.get("title") or [""])[0]
                         metadata_title = it_title
 
@@ -1422,7 +1746,12 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
                         if year_value is not None and crossref_year.isdigit():
                             y_cr = int(crossref_year)
                             year_ok = abs(y_cr - year_value) <= (1 if year_value <= 1990 else 2)
-                        author_ok = bool(first_author and any(surname_match(first_author, fam) for fam in meta_authors))
+                        author_comparison = compare_author_lists(
+                            submitted_authors,
+                            metadata_authors,
+                            uses_et_al=submitted_uses_et_al,
+                        )
+                        author_ok = author_comparison["ok"]
                         journal_ok = journals_match(ref_journal, crossref_journal)
                         title_threshold = 0.78 if (year_value is not None and year_value <= 1990) else 0.75
                         title_ok, title_similarity_score, title_match_method, title_match_confidence = evaluate_title_match(
@@ -1458,14 +1787,23 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
                     items2 = resp2.json().get("message", {}).get("items", [])
                     if items2:
                         had_crossref_candidate = True
-                        item2, why2 = choose_best_crossref_item(ref_clean, items2, first_author, year, ref_journal, title)
+                        item2, why2 = choose_best_crossref_item(
+                            ref_clean,
+                            items2,
+                            first_author,
+                            year,
+                            ref_journal,
+                            title,
+                            submitted_authors=submitted_authors,
+                            submitted_uses_et_al=submitted_uses_et_al,
+                        )
                         if item2:
                             item = item2
                             crossref_doi = item.get("DOI", "") or ""
                             crossref_journal = (item.get("container-title") or [""])[0]
                             iss = item.get("issued", {}).get("date-parts", [[None]])[0][0]
                             crossref_year = str(iss or "")
-                            meta_authors = [a.get("family", "") for a in item.get("author", [])]
+                            metadata_authors = metadata_author_surnames(item.get("author", []))
                             it_title = (item.get("title") or [""])[0]
                             metadata_title = it_title
 
@@ -1485,7 +1823,12 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
                             if year_value is not None and crossref_year.isdigit():
                                 y_cr = int(crossref_year)
                                 year_ok = abs(y_cr - year_value) <= (1 if year_value <= 1990 else 2)
-                            author_ok = bool(first_author and any(surname_match(first_author, fam) for fam in meta_authors))
+                            author_comparison = compare_author_lists(
+                                submitted_authors,
+                                metadata_authors,
+                                uses_et_al=submitted_uses_et_al,
+                            )
+                            author_ok = author_comparison["ok"]
                             journal_ok = journals_match(ref_journal, crossref_journal)
                             title_threshold = 0.78 if (year_value is not None and year_value <= 1990) else 0.75
                             title_ok, title_similarity_score, title_match_method, title_match_confidence = evaluate_title_match(
@@ -1523,6 +1866,12 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
             "doi_ok": doi_ok,
             "year_ok": year_ok,
             "author_ok": author_ok,
+            **author_comparison_fields(
+                submitted_authors,
+                metadata_authors,
+                uses_et_al=submitted_uses_et_al,
+                comparison=author_comparison,
+            ),
             "journal_ok": journal_ok,
             "Validation Result": base_result,
             "Raw Result": base_result,
@@ -1537,8 +1886,12 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
 
     metadata_year_value, _ = parse_year_token(crossref_year or pubmed_year)
     metadata_journal = crossref_journal or pubmed_journal
+    author_conflict = bool(
+        submitted_authors and metadata_authors and not author_comparison["ok"]
+    )
     metadata_conflicts = collect_confirmed_metadata_conflicts(
         {
+            "authors": (bool(submitted_authors), bool(metadata_authors), author_ok),
             "year": (year_value is not None, metadata_year_value is not None, year_ok),
             "journal": (bool(ref_journal), bool(metadata_journal), journal_ok),
             "volume": (bool(ref_vol), bool(cr_vol), vol_ok),
@@ -1566,6 +1919,7 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
         manual_review_web=manual_review_web,
         metadata_conflicts=metadata_conflicts,
         strong_identity_match=strong_identity_match,
+        author_conflict=author_conflict,
     )
 
     if doi_invalid:
@@ -1617,6 +1971,12 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
         "doi_ok": doi_ok,
         "year_ok": year_ok,
         "author_ok": author_ok,
+        **author_comparison_fields(
+            submitted_authors,
+            metadata_authors,
+            uses_et_al=submitted_uses_et_al,
+            comparison=author_comparison,
+        ),
         "journal_ok": journal_ok,
         "Validation Result": result,
         "Raw Result": result,
@@ -1680,6 +2040,8 @@ def build_excel_workbook(
 
         base_order += [
             "Manual review", "AI URL flag", "AL notes",
+            "Extracted Authors", "Metadata Authors", "Author match method",
+            "Author match count", "Submitted author count", "Metadata author count",
             "Reference", "Domain", "Domains", "Source URL",
             "Extracted DOI", "DOI Source", "Crossref DOI", "Crossref Journal", "Crossref Year",
             "PubMed ID", "PubMed Journal", "PubMed Year", "Notes"
@@ -1687,6 +2049,8 @@ def build_excel_workbook(
 
         debug_order = [
             "doi_explicit_ok", "doi_derived_ok", "year_ok", "author_ok", "journal_ok",
+            "Uses et al.", "First author matches", "Author submitted coverage",
+            "Author metadata coverage",
             "title_ok", "title_similarity", "title_match_confidence", "title_match_method",
             "strong_identity_match", "vol_ok", "issue_ok", "pages_ok", "metadata_conflict_count",
             "metadata_conflicts",
@@ -1925,7 +2289,7 @@ The score helps show how strong the match is, but the score alone does **not** m
 
 **❌ Possible falsification**
 - A DOI is present but does not work and the rest of the reference is weak, or
-- The DOI works but **both** the author and title do not match, or
+- The DOI works but **both** the submitted author list and title do not match, or
 - A strong title-and-author match identifies a work, but **three or more supplied bibliographic fields** contradict its trusted record, or
 - The reference fails most checks and does not look reliable
 
@@ -1934,7 +2298,18 @@ The score helps show how strong the match is, but the score alone does **not** m
 - Missing values are not counted as contradictions
 - Two confirmed conflicts produce **⚠ Suspicious**
 - Three or more confirmed conflicts produce **❌ Possible falsification**
-- These rules currently compare year, journal, volume, issue and pages; the structure can also accept full-author-list conflicts later
+- These rules compare the submitted author list, year, journal, volume, issue and pages
+""")
+
+with st.expander("How authors are checked"):
+    st.markdown("""
+Agent Ref extracts every author surname supplied by the student and compares the
+list with trusted Crossref, PubMed or PMC metadata.
+
+- A complete list must have the same first author and at least **80% coverage in both directions**
+- With **et al.**, every author explicitly named before *et al.* must match the corresponding leading metadata author
+- A missing or changed co-author is therefore visible even when the first author matches
+- If a DOI resolves but the supplied author list conflicts with trusted metadata, the reference is routed to **⚠ Suspicious** rather than **✅ Real**
 """)
 
 with st.expander("How titles are checked"):
@@ -1958,7 +2333,7 @@ The score is a simple guide that shows how many parts of the reference match tru
 **Points**
 - **4 points** for a DOI given in the reference that works
 - **0 points** for a DOI derived by the validator; it is used only to retrieve metadata
-- **2 points** if the author matches
+- **2 points** if the submitted author list matches
 - **2 points** if the title matches directly or through the guarded title back-validation check
 - **2 points** if the year matches
 - **1 point** if the journal matches
@@ -2183,6 +2558,8 @@ def build_display_df(df: pd.DataFrame, *, view: str, include_review: bool) -> pd
         "DOI score",
         "AI URL flag",
         "AL notes",
+        "Extracted Authors", "Metadata Authors", "Author match method",
+        "Author match count", "Submitted author count", "Metadata author count",
         "Is Review", "Review Source",
         "Reference",
         "Domain", "Domains",
@@ -2199,7 +2576,11 @@ def build_display_df(df: pd.DataFrame, *, view: str, include_review: bool) -> pd
     if not include_review:
         cols = [c for c in cols if c not in ("Is Review", "Review Source")]
 
-    debug_cols = ["doi_explicit_ok", "doi_derived_ok", "year_ok", "author_ok", "journal_ok"]
+    debug_cols = [
+        "doi_explicit_ok", "doi_derived_ok", "year_ok", "author_ok", "journal_ok",
+        "Uses et al.", "First author matches", "Author submitted coverage",
+        "Author metadata coverage",
+    ]
     if debug_mode:
         cols += debug_cols
 
