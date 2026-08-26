@@ -5,6 +5,10 @@ Streamlit app for validating reference lists using DOI (Crossref + doi.org), Pub
 The interface includes a **Reference debugging tool** link to the hosted Regex
 Inspector for examining extracted fields and validation comparisons.
 
+Links carrying `utm_source=chatgpt.com` are marked in the **AI URL flag** and
+**AL notes** fields. This is an advisory provenance signal and does not change
+the validation result or score.
+
 ## Run locally
 
 1. Create a virtual environment and install dependencies:
