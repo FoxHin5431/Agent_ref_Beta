@@ -36,6 +36,7 @@ from difflib import SequenceMatcher
 import unicodedata
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 import xml.etree.ElementTree as ET
 #import psycopg2
 #from psycopg2.extras import Json
@@ -871,6 +872,10 @@ def extract_vol_issue_pages(ref: str):
     m_vi = re.search(r"\b(\d{1,4})\s*\(\s*([A-Za-z0-9\-]+)\s*\)", s)
     vol = m_vi.group(1) if m_vi else ""
     issue = m_vi.group(2) if m_vi else ""
+    if issue and YEAR_TOKEN_RE.fullmatch(issue):
+        # In styles such as ``vol. 42 (2015a)``, the parenthesized token is
+        # the publication year rather than an issue number.
+        issue = ""
 
     m_pp = re.search(r"\bpp?\.\s*([0-9]+(?:\s*[-–]\s*[0-9]+)?)", s, flags=re.I)
     if not m_pp:
@@ -1635,6 +1640,10 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
                 pubmed_id = pmid_val
                 pubmed_journal = summary.get("fulljournalname", "")
                 pubmed_year = summary.get("pubdate", "")
+                metadata_title = str(summary.get("title") or "")
+                cr_vol = str(summary.get("volume") or "").strip()
+                cr_issue = str(summary.get("issue") or "").strip()
+                cr_pages = str(summary.get("pages") or summary.get("elocationid") or "").strip()
                 m_year = re.search(r"\b(1[89]\d{2}|20\d{2})\b", str(pubmed_year))
                 year_ok = bool(year_value is not None and m_year and year_value == int(m_year.group(1)))
 
@@ -1666,6 +1675,10 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
 
                 pubmed_journal = summary.get("fulljournalname") or summary.get("source") or ""
                 pubmed_year = str(summary.get("pubdate") or summary.get("epubdate") or summary.get("sortpubdate") or "")
+                metadata_title = str(summary.get("title") or "")
+                cr_vol = str(summary.get("volume") or "").strip()
+                cr_issue = str(summary.get("issue") or "").strip()
+                cr_pages = str(summary.get("pages") or summary.get("elocationid") or "").strip()
                 m_year = re.search(r"\b(1[89]\d{2}|20\d{2})\b", pubmed_year)
                 year_ok = bool(year_value is not None and m_year and year_value == int(m_year.group(1)))
 
@@ -1963,6 +1976,16 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
         "Crossref DOI": (crossref_doi or "").rstrip(".,;:)"),
         "Crossref Journal": crossref_journal,
         "Crossref Year": crossref_year,
+        "Extracted Title": title,
+        "Metadata Title": metadata_title,
+        "Extracted Year": year,
+        "Extracted Journal": ref_journal,
+        "Extracted Volume": ref_vol,
+        "Extracted Issue": ref_issue,
+        "Extracted Pages": ref_pages,
+        "Metadata Volume": cr_vol,
+        "Metadata Issue": cr_issue,
+        "Metadata Pages": cr_pages,
         "PubMed ID": pubmed_id,
         "PubMed Journal": pubmed_journal,
         "PubMed Year": pubmed_year,
@@ -2251,188 +2274,571 @@ def sanity_check(raw_text: str) -> list[str]:
 # Streamlit UI
 # =========================
 
-st.title("📚 Agent Ref")
-st.subheader("BETA VERSION")
-st.caption("This is a test version for new functions")
-
-if "sid" not in st.session_state:
-    st.session_state["sid"] = str(uuid.uuid4())
-
-st.write(
-    """
-    Validates references via DOI / PubMed / Crossref and classifies results:
-    - ✅ Real → student-supplied DOI verified with matching metadata; OR DOI-less metadata checks pass; OR PMCID/PMID verification
-    - 🟡 Manual review – web source / report / dataset → organisational or dataset/report-style web source with URL
-    - 📄 Web Source (trusted) / 📄 Web Source → general website/URL
-    - ⚠ Suspicious → partial mismatch or unverifiable but well-formed
-    - ❌ possible falsification → fabricated pairing or failed checks
-    """
+st.set_page_config(
+    page_title="Agent Ref — Beta",
+    page_icon="🐢",
+    layout="wide",
+    initial_sidebar_state="expanded",
 )
 
-with st.expander("How the result is decided"):
-    st.markdown("""
-A reference is **only** marked **✅ Real** when it passes a verification rule.  
-The score helps show how strong the match is, but the score alone does **not** make a reference real.
+RESULTS_GUIDE_MD = """
+Agent Ref marks a reference **Real** only when it passes a verification rule.
+The score describes the strength of the evidence, but it does not decide the
+result by itself.
 
-**✅ Real**
-- A DOI works and the key details match well enough, or
-- If there is no DOI, the **year**, **author**, and **journal** all match trusted records
+- **Real:** A supplied DOI resolves and key details agree, or a DOI-free record
+  has a strong match across trusted bibliographic metadata.
+- **Manual review:** The source looks like a report, data set or organizational
+  webpage that cannot be judged like a journal article.
+- **Web source:** The item is a general webpage rather than a conventional
+  academic publication.
+- **Suspicious:** Some evidence agrees, but the reference is incomplete,
+  unverifiable or contains a meaningful conflict.
+- **Possible falsification:** The reference has a failed identifier, a fabricated
+  pairing or several confirmed conflicts.
 
-**🟡 Manual review – web source / report / dataset**
-- The reference looks like an organisational source, fact sheet, report, repository, or dataset
-- It contains a URL, but it is not a standard journal-style reference
-- These are not marked false automatically and should be checked manually
+Confirmed conflicts are considered before the score. Missing information is not
+treated as a contradiction.
+"""
 
-**⚠ Suspicious**
-- Some parts match, but the reference cannot be fully confirmed, or
-- It looks like a genuine reference, but there is not enough evidence to verify it properly
+AUTHORS_GUIDE_MD = """
+Agent Ref extracts every surname supplied by the student and compares it with
+Crossref, PubMed or PMC metadata.
 
-**❌ Possible falsification**
-- A DOI is present but does not work and the rest of the reference is weak, or
-- The DOI works but **both** the submitted author list and title do not match, or
-- A strong title-and-author match identifies a work, but **three or more supplied bibliographic fields** contradict its trusted record, or
-- The reference fails most checks and does not look reliable
+- A complete list must have the same first author and at least **80% coverage in
+  both directions**.
+- With **et al.**, every author named before *et al.* must match the corresponding
+  author in the trusted record.
+- A resolved DOI with a conflicting author list is sent for review rather than
+  being marked Real automatically.
+"""
 
-**Conflict rules run before the score**
-- They apply when the validator discovers the candidate work rather than relying on a DOI supplied by the student
-- Missing values are not counted as contradictions
-- Two confirmed conflicts produce **⚠ Suspicious**
-- Three or more confirmed conflicts produce **❌ Possible falsification**
-- These rules compare the submitted author list, year, journal, volume, issue and pages
-""")
+TITLES_GUIDE_MD = """
+Agent Ref first compares the extracted title with the trusted title. If
+punctuation or formatting caused a poor extraction, it checks whether a
+distinctive trusted title appears in the extracted title or anywhere in the
+complete submitted reference.
 
-with st.expander("How authors are checked"):
-    st.markdown("""
-Agent Ref extracts every author surname supplied by the student and compares the
-list with trusted Crossref, PubMed or PMC metadata.
-
-- A complete list must have the same first author and at least **80% coverage in both directions**
-- With **et al.**, every author explicitly named before *et al.* must match the corresponding leading metadata author
-- A missing or changed co-author is therefore visible even when the first author matches
-- If a DOI resolves but the supplied author list conflicts with trusted metadata, the reference is routed to **⚠ Suspicious** rather than **✅ Real**
-""")
-
-with st.expander("How titles are checked"):
-    st.markdown("""
-The validator first compares the title extracted from the student reference with the trusted metadata title.
-
-If punctuation or formatting caused a poor extraction, it then checks whether a sufficiently distinctive trusted title appears:
-
-- inside the extracted student title, or
-- anywhere in the complete student reference
-
-Short generic titles are not allowed to pass through this fallback. The result records the title-match method and confidence for inspection.
-
-Titles may be enclosed in straight or curly single or double quotation marks.
-""")
-
-with st.expander("How the score is calculated"):
-    st.markdown("""
-The score is a simple guide that shows how many parts of the reference match trusted records.
-
-**Points**
-- **4 points** for a DOI given in the reference that works
-- **0 points** for a DOI derived by the validator; it is used only to retrieve metadata
-- **2 points** if the submitted author list matches
-- **2 points** if the title matches directly or through the guarded title back-validation check
-- **2 points** if the year matches
-- **1 point** if the journal matches
-- **1 point** if the volume matches
-- **1 point** if the issue matches
-- **1 point** if the pages match
-- **1 point** if the reference is in a believable format
-
-**Maximum score: 15**
-
-**How to read the score**
-- **0 to 3**: very weak match
-- **4 to 7**: limited match, usually needs caution
-- **8 to 11**: moderate match, may look plausible but still not confirmed
-- **12 to 15**: strong match
-
-**Important**
-A higher score means the reference looks stronger, but the score does **not** decide the final label on its own.
-
-A reference is only marked **✅ Real** if it passes the verification rules.  
-This means a high score can still be **⚠ Suspicious** or **❌ Possible falsification** if key checks fail.
-""")
+Short, generic titles cannot pass through this fallback. Straight or curly
+single and double quotation marks are supported.
+"""
 
 st.markdown(
     """
     <style>
-    .wrap-text { white-space: normal !important; word-wrap: break-word !important; }
+    :root {
+        --ar-bg: #F4FBF9;
+        --ar-surface: #FFFFFF;
+        --ar-surface-soft: #EAF7F4;
+        --ar-text: #102A2E;
+        --ar-muted: #536B70;
+        --ar-primary: #067A8F;
+        --ar-primary-dark: #034E5B;
+        --ar-neon: #00E5C7;
+        --ar-mint: #71FFB2;
+        --ar-lime: #EFFF6A;
+        --ar-warning: #8A5700;
+        --ar-warning-bg: #FFF3C4;
+        --ar-danger: #9F241C;
+        --ar-danger-bg: #FFE2DE;
+        --ar-success: #086B4E;
+        --ar-success-bg: #D9FBE8;
+        --ar-border: #C9DDD9;
+    }
+
+    [data-testid="stAppViewContainer"] {
+        background:
+            radial-gradient(circle at 88% 3%, rgba(0, 229, 199, 0.13), transparent 25rem),
+            var(--ar-bg);
+        color: var(--ar-text);
+    }
+
+    [data-testid="stHeader"] { background: rgba(244, 251, 249, 0.82); }
+
+    [data-testid="stSidebar"] {
+        background: linear-gradient(180deg, #063F49 0%, #052F36 100%);
+        border-right: 1px solid rgba(113, 255, 178, 0.28);
+    }
+
+    [data-testid="stSidebar"] * { color: #F5FFFC; }
+    [data-testid="stSidebar"] [data-testid="stCaptionContainer"] p {
+        color: #C5DFDB !important;
+    }
+
+    .block-container {
+        max-width: 1180px;
+        padding-top: 2.2rem;
+        padding-bottom: 5rem;
+    }
+
+    .ar-hero {
+        position: relative;
+        overflow: hidden;
+        padding: 2.1rem 2.3rem;
+        margin-bottom: 1.8rem;
+        border-radius: 28px;
+        background: linear-gradient(130deg, #043C46 0%, #067A8F 72%, #0797A5 100%);
+        color: white;
+        box-shadow: 0 18px 46px rgba(3, 78, 91, 0.16);
+    }
+
+    .ar-hero::after {
+        content: "";
+        position: absolute;
+        width: 210px;
+        height: 210px;
+        right: -55px;
+        top: -85px;
+        border-radius: 50%;
+        background: var(--ar-lime);
+        opacity: 0.92;
+    }
+
+    .ar-eyebrow {
+        display: inline-flex;
+        padding: 0.28rem 0.7rem;
+        margin-bottom: 0.8rem;
+        border: 1px solid rgba(255,255,255,0.35);
+        border-radius: 999px;
+        font-size: 0.78rem;
+        font-weight: 750;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+    }
+
+    .ar-hero h1 {
+        margin: 0;
+        color: white;
+        font-size: clamp(2.25rem, 5vw, 4rem);
+        line-height: 1;
+        letter-spacing: -0.045em;
+    }
+
+    .ar-hero p {
+        max-width: 680px;
+        margin: 0.9rem 0 0;
+        color: #DFFBF6;
+        font-size: 1.08rem;
+    }
+
+    .ar-section-kicker {
+        margin: 2.2rem 0 0.25rem;
+        color: var(--ar-primary);
+        font-size: 0.78rem;
+        font-weight: 800;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+    }
+
+    .ar-count {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 0.5rem;
+        box-sizing: border-box;
+        height: 2.75rem;
+        padding: 0.35rem 0.75rem;
+        border: 1px solid var(--ar-border);
+        border-radius: 999px;
+        background: var(--ar-surface-soft);
+        color: var(--ar-primary-dark);
+        font-weight: 700;
+        transform: translateY(-0.5rem);
+    }
+
+    div[data-testid="stColumn"]:has(.ar-count) [data-testid="stMarkdownContainer"] {
+        display: flex;
+        min-height: 2.75rem;
+        align-items: center;
+    }
+
+    .ar-summary-card {
+        box-sizing: border-box;
+        height: 132px;
+        padding: 1rem 1.05rem;
+        border: 1px solid var(--ar-border);
+        border-radius: 20px;
+        background: var(--ar-surface);
+        box-shadow: 0 8px 24px rgba(15, 61, 68, 0.07);
+        display: flex;
+        flex-direction: column;
+        justify-content: flex-start;
+    }
+
+    .ar-summary-card .value {
+        display: block;
+        margin-bottom: 0.18rem;
+        color: var(--ar-text);
+        font-size: 2rem;
+        font-weight: 820;
+        line-height: 1;
+    }
+
+    .ar-summary-card .label {
+        color: var(--ar-muted);
+        font-size: 0.86rem;
+        font-weight: 650;
+        line-height: 1.25;
+    }
+
+    .ar-summary-card.real { border-top: 5px solid var(--ar-mint); }
+    .ar-summary-card.review { border-top: 5px solid var(--ar-primary); }
+    .ar-summary-card.warning { border-top: 5px solid #F4C84B; }
+    .ar-summary-card.danger { border-top: 5px solid #D94B43; }
+    .ar-summary-card.total { border-top: 5px solid var(--ar-neon); }
+
+    .st-key-summary_filters [data-testid="stButton"] button {
+        box-sizing: border-box;
+        height: 132px;
+        padding: 1rem 1.05rem;
+        border: 1px solid var(--ar-border);
+        border-radius: 20px;
+        background: var(--ar-surface);
+        color: var(--ar-text);
+        box-shadow: 0 8px 24px rgba(15, 61, 68, 0.07);
+        align-items: flex-start;
+        justify-content: flex-start;
+        text-align: left;
+        white-space: normal;
+    }
+
+    .st-key-summary_filters [data-testid="stButton"] button p {
+        color: var(--ar-muted);
+        font-size: 0.86rem;
+        font-weight: 650;
+        line-height: 1.25;
+        text-align: left;
+        white-space: normal;
+    }
+
+    .st-key-summary_filters [data-testid="stButton"] button strong {
+        display: block;
+        margin-bottom: 0.2rem;
+        color: var(--ar-text);
+        font-size: 2rem;
+        font-weight: 820;
+        line-height: 1;
+    }
+
+    .st-key-summary_filters [data-testid="stButton"] button[kind="primary"] {
+        border-color: var(--ar-primary);
+        background: var(--ar-surface-soft);
+        color: var(--ar-text);
+        box-shadow: 0 0 0 3px rgba(0, 229, 199, 0.18),
+                    0 8px 24px rgba(15, 61, 68, 0.07);
+    }
+
+    .st-key-summary_all button { border-top: 5px solid var(--ar-neon) !important; }
+    .st-key-summary_real button { border-top: 5px solid var(--ar-mint) !important; }
+    .st-key-summary_review button { border-top: 5px solid var(--ar-primary) !important; }
+    .st-key-summary_suspicious button { border-top: 5px solid #F4C84B !important; }
+    .st-key-summary_danger button { border-top: 5px solid #D94B43 !important; }
+
+    .ar-reference-card {
+        padding: 1.15rem 1.25rem;
+        margin: 0.5rem 0 1rem;
+        border: 1px solid var(--ar-border);
+        border-left: 6px solid var(--ar-primary);
+        border-radius: 18px;
+        background: var(--ar-surface);
+        box-shadow: 0 8px 24px rgba(15, 61, 68, 0.06);
+    }
+
+    .ar-reference-card.real { border-left-color: var(--ar-success); }
+    .ar-reference-card.warning { border-left-color: #D69A00; }
+    .ar-reference-card.danger { border-left-color: var(--ar-danger); }
+
+    .ar-reference-meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.55rem;
+        margin-bottom: 0.75rem;
+    }
+
+    .ar-chip {
+        display: inline-flex;
+        padding: 0.3rem 0.65rem;
+        border-radius: 999px;
+        background: var(--ar-surface-soft);
+        color: var(--ar-primary-dark);
+        font-size: 0.82rem;
+        font-weight: 750;
+    }
+
+    .ar-reference-text { color: var(--ar-text); line-height: 1.55; }
+
+    .ar-guide {
+        padding: 1.3rem 1.45rem;
+        margin-bottom: 1rem;
+        border: 1px solid var(--ar-border);
+        border-radius: 20px;
+        background: rgba(255,255,255,0.82);
+    }
+
+    .ar-sidebar-brand {
+        margin: 0.35rem 0 1.2rem;
+        font-size: 1.35rem;
+        font-weight: 850;
+        letter-spacing: -0.03em;
+    }
+
+    .ar-sidebar-brand span { color: var(--ar-lime); }
+
+    [data-testid="stSidebar"] div[role="radiogroup"] {
+        gap: 0.3rem;
+        margin: 1rem 0 1.4rem;
+    }
+
+    [data-testid="stSidebar"] div[role="radiogroup"] label {
+        box-sizing: border-box;
+        width: 100%;
+        padding: 0.66rem 0.75rem;
+        border: 1px solid transparent;
+        border-radius: 12px;
+        transition: background 120ms ease, border-color 120ms ease;
+    }
+
+    [data-testid="stSidebar"] div[role="radiogroup"] label:hover {
+        background: rgba(0, 229, 199, 0.12);
+    }
+
+    [data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) {
+        border-color: rgba(113, 255, 178, 0.55);
+        background: rgba(0, 229, 199, 0.18);
+    }
+
+    div[data-testid="stTextArea"] textarea,
+    div[data-testid="stTextInput"] input {
+        border-color: var(--ar-border);
+        border-radius: 16px;
+        background: white;
+        color: var(--ar-text) !important;
+        caret-color: var(--ar-primary);
+    }
+
+    div[data-testid="stTextArea"] textarea::placeholder,
+    div[data-testid="stTextInput"] input::placeholder {
+        color: #789095 !important;
+        opacity: 1;
+    }
+
+    div[data-testid="stTextArea"] textarea:focus,
+    div[data-testid="stTextInput"] input:focus {
+        border-color: var(--ar-primary);
+        box-shadow: 0 0 0 3px rgba(0, 229, 199, 0.18);
+    }
+
+    .stButton > button,
+    .stDownloadButton > button,
+    [data-testid="stLinkButton"] a {
+        min-height: 2.75rem;
+        border-radius: 999px;
+        font-weight: 750;
+    }
+
+    .stButton > button[kind="primary"],
+    .stDownloadButton > button {
+        border: 1px solid var(--ar-primary-dark);
+        background: var(--ar-primary);
+        color: white;
+    }
+
+    .stButton > button[kind="secondary"] {
+        border: 1px solid #8CB8B2;
+        background: white;
+        color: var(--ar-primary-dark);
+    }
+
+    [data-testid="stLinkButton"] a {
+        border-color: rgba(113, 255, 178, 0.45);
+        background: rgba(0, 229, 199, 0.12);
+        color: white !important;
+    }
+
+    [data-testid="stProgress"] > div > div > div > div {
+        background: linear-gradient(90deg, var(--ar-neon), var(--ar-primary));
+    }
+
+    [data-testid="stDataFrame"] {
+        overflow: hidden;
+        border: 1px solid var(--ar-border);
+        border-radius: 16px;
+    }
+
+    h1, h2, h3 { color: var(--ar-text); letter-spacing: -0.025em; }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-with st.expander("Reference debugging tool"):
-    st.markdown(
-        """
-        Use the regex inspector to see how Agent Ref extracts each part of a reference
-        and compares it against the external validation result.
+if "sid" not in st.session_state:
+    st.session_state["sid"] = str(uuid.uuid4())
+if "validation_results" not in st.session_state:
+    st.session_state["validation_results"] = []
+if "last_checked_count" not in st.session_state:
+    st.session_state["last_checked_count"] = 0
 
-        [Open the regex inspector](https://agent-ref-regex-inspector.streamlit.app/)
-        """
+with st.sidebar:
+    st.markdown(
+        '<div class="ar-sidebar-brand">Agent Ref <span>beta</span></div>',
+        unsafe_allow_html=True,
+    )
+    if "check_reviews" not in st.session_state:
+        st.session_state["check_reviews"] = False
+    check_reviews = st.toggle(
+        f"Detect reviews: {'on' if st.session_state['check_reviews'] else 'off'}",
+        key="check_reviews",
+        help="Check PubMed publication types and title patterns. This can take longer.",
+    )
+    st.caption("Review detection will slow down the response time.")
+
+    page_choice = st.radio(
+        "Pages",
+        [
+            "Check references",
+            "How results are decided",
+            "How authors are checked",
+            "How titles are checked",
+        ],
+        key="page_choice",
+        label_visibility="collapsed",
     )
 
-debug_mode = st.checkbox("Show debug details", value=False)
+    with st.expander("Advanced"):
+        debug_mode = st.checkbox(
+            "Show technical details",
+            value=False,
+            help="Add internal validation flags to the all-references view and full downloads.",
+        )
 
-check_reviews = st.checkbox(
-    "Detect reviews (slower)",
-    value=False,
-    help="If enabled, Agent Ref will try to detect reviews using PubMed publication types and title heuristics."
+    st.link_button(
+        "Open regex inspector",
+        "https://agent-ref-regex-inspector.streamlit.app/",
+        use_container_width=True,
+    )
+
+st.markdown(
+    """
+    <section class="ar-hero">
+      <span class="ar-eyebrow">Beta test version</span>
+      <h1>Agent Ref</h1>
+      <p>Validate a reference list against academic databases.</p>
+    </section>
+    """,
+    unsafe_allow_html=True,
 )
 
-table_view = st.selectbox(
-    "Table view",
-    ["Full", "Condensed"],
-    index=0,
-    help="Condensed view shows only key columns for quick marking."
-)
+if page_choice != "Check references":
+    st.markdown('<div class="ar-section-kicker">Guide</div>', unsafe_allow_html=True)
+    if page_choice == "How results are decided":
+        st.header("How results are decided")
+        with st.container(border=True):
+            st.markdown(RESULTS_GUIDE_MD)
+            st.markdown(
+                """
+                **Evidence score**
 
-if debug_mode:
-    st.info("Debug shows extra check columns and flags for explicit/derived/heuristic DOI, plus which checks passed.")
+                - **4 points:** A DOI supplied by the student resolves.
+                - **2 points each:** The author list, title and year match.
+                - **1 point each:** The journal, volume, issue, pages and overall
+                  reference structure match.
+
+                A DOI found by Agent Ref retrieves metadata but adds no points.
+                """
+            )
+    elif page_choice == "How authors are checked":
+        st.header("How authors are checked")
+        with st.container(border=True):
+            st.markdown(AUTHORS_GUIDE_MD)
+    else:
+        st.header("How titles are checked")
+        with st.container(border=True):
+            st.markdown(TITLES_GUIDE_MD)
+
+    st.markdown(
+        """
+        <div style="margin-top:3rem;padding-top:1rem;border-top:1px solid #C9DDD9;color:#536B70;font-size:.86rem">
+          Agent Ref beta · Created by Mark Hintze ·
+          <a href="mailto:FoxHin5431@users.noreply.github.com">FoxHin5431@users.noreply.github.com</a>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.stop()
 
 def clear_ref_input():
     st.session_state["ref_input"] = ""
+    st.session_state["validation_results"] = []
+    st.session_state["last_checked_count"] = 0
+
 
 if "ref_input" not in st.session_state:
     st.session_state["ref_input"] = ""
 
-input_col, clear_col = st.columns([8, 1])
-
-with input_col:
-    user_input = st.text_area(
-        "Paste references here:",
-        height=300,
-        key="ref_input"
-    )
-
-with clear_col:
-    st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
-    st.button("Clear box", on_click=clear_ref_input, use_container_width=True)
-
-if "prefix" not in st.session_state:
-    st.session_state["prefix"] = ""
-prefix_input = st.text_input(
-    "Optional file name prefix",
-    value=st.session_state["prefix"],
-    placeholder="e.g., cohortA_run3",
-    help="If provided, this will be prepended to the CSV and Excel filenames."
+st.markdown('<div id="check-references"></div>', unsafe_allow_html=True)
+st.markdown('<div class="ar-section-kicker">Reference check</div>', unsafe_allow_html=True)
+st.header("Paste your references")
+st.caption(
+    "Paste a reference list from Word, a PDF or another document. "
+    "Line breaks inside a reference are treated as spaces when possible."
 )
-st.session_state["prefix"] = prefix_input
-prefix = sanitize_prefix(st.session_state["prefix"])
+
+user_input = st.text_area(
+    "References",
+    height=330,
+    key="ref_input",
+    placeholder=(
+        "Example:\n"
+        "Stern, C.D. and Piatkowska, A.M. (2015) 'Multiple roles of timing "
+        "in somite formation.' Seminars in Cell & Developmental Biology, 42, pp. 134–139."
+    ),
+    label_visibility="collapsed",
+)
+
+ready_refs = []
+if user_input.strip():
+    try:
+        ready_refs = split_references(user_input)
+    except Exception:
+        ready_refs = []
+
+action_col, clear_col, count_col = st.columns([1.7, 1.7, 4.6], vertical_alignment="center")
+with action_col:
+    run_clicked = st.button(
+        "Check references",
+        type="primary",
+        use_container_width=True,
+    )
+with clear_col:
+    st.button("Clear", on_click=clear_ref_input, use_container_width=True)
+with count_col:
+    ready_label = "reference" if len(ready_refs) == 1 else "references"
+    st.markdown(
+        f'<div class="ar-count">{len(ready_refs)} {ready_label} ready to check</div>',
+        unsafe_allow_html=True,
+    )
 
 if user_input.strip():
     warns = sanity_check(user_input)
     if warns:
-        st.warning("⚠️ Reference formatting may be inconsistent:\n\n- " + "\n- ".join(warns))
+        st.warning("Reference formatting may be inconsistent:\n\n- " + "\n- ".join(warns))
+
+st.caption(
+    "When you select Check references, Agent Ref records the submitted list, "
+    "the result summary and any errors to help improve this beta. "
+    "It does not collect personal user data."
+)
 
 def _utc_now():
     return datetime.now(timezone.utc)
 
 def _log_run(*, input_text: str, split_refs: list[str], result_counts: dict, error_text: str | None):
+    possible_secret_files = (
+        Path.home() / ".streamlit" / "secrets.toml",
+        Path.cwd() / ".streamlit" / "secrets.toml",
+    )
+    if not any(path.is_file() for path in possible_secret_files):
+        return
     try:
         if not st.secrets.get("LOGGING_ENABLED", False):
             return
@@ -2465,11 +2871,6 @@ def _log_run(*, input_text: str, split_refs: list[str], result_counts: dict, err
     # finally:
     #     conn.close()
     return
-
-st.caption(
-    "Clicking ‘Check References’ logs the reference list, validation summary, and errors for improvement purposes. "
-    "No personal user data is collected."
-)
 
 # =========================
 # Display helpers
@@ -2520,20 +2921,6 @@ def add_link_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     out["PubMed link"] = out.apply(lambda r: _pubmed_link(str(r.get("PubMed ID") or "")), axis=1)
     out["Source link"] = out.apply(lambda r: str(r.get("Source URL") or "").strip(), axis=1)
-
-    return out
-
-    def _pubmed_link(val: str) -> str:
-        v = (val or "").strip()
-        if not v:
-            return ""
-        if v.upper().startswith("PMC"):
-            return f"https://www.ncbi.nlm.nih.gov/pmc/articles/{v}/"
-        if v.isdigit():
-            return f"https://pubmed.ncbi.nlm.nih.gov/{v}/"
-        return ""
-
-    out["PubMed link"] = out.apply(lambda r: _pubmed_link(str(r.get("PubMed ID") or "")), axis=1)
 
     return out
 
@@ -2591,179 +2978,499 @@ def build_display_df(df: pd.DataFrame, *, view: str, include_review: bool) -> pd
     existing_cols = [c for c in cols if c in df2.columns]
     return df2[existing_cols].copy()
 
-if st.button("Check References"):
-    if user_input.strip():
-        refs: list[str] = []
-        result_counts: dict = {}
-        error_text: str | None = None
+def _display_text(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float):
+        return f"{value:.3f}"
+    return html.unescape(str(value))
 
-        try:
-            refs = split_references(user_input)
 
-            if debug_mode:
-                st.write(f"🔎 Detected {len(refs)} references")
-                for i, r in enumerate(refs[:8], 1):
-                    st.write(f"{i}. {r[:250]}{'…' if len(r)>250 else ''}")
+def _part_status(matches: bool, submitted, metadata) -> str:
+    submitted_text = _display_text(submitted).strip()
+    metadata_text = _display_text(metadata).strip()
+    if not submitted_text and not metadata_text:
+        return "Not available"
+    if not metadata_text:
+        return "Not found"
+    if not submitted_text:
+        return "Metadata only"
+    return "Matched" if bool(matches) else "Different"
+
+
+def build_part_by_part_df(row: pd.Series) -> pd.DataFrame:
+    submitted_doi = _display_text(row.get("Extracted DOI")).strip()
+    metadata_doi = _display_text(row.get("Crossref DOI")).strip()
+    if bool(row.get("doi_explicit_ok")):
+        doi_status = "Matched"
+        doi_explanation = "The DOI supplied in the reference resolves."
+    elif bool(row.get("doi_derived_ok")):
+        doi_status = "Metadata only"
+        doi_explanation = "Agent Ref found this DOI; it did not add points to the score."
+    elif submitted_doi:
+        doi_status = "Different"
+        doi_explanation = "The supplied DOI could not be confirmed."
+    else:
+        doi_status = "Not found"
+        doi_explanation = "No DOI was supplied or recovered."
+
+    submitted_authors = _display_text(row.get("Extracted Authors"))
+    metadata_authors = _display_text(row.get("Metadata Authors"))
+    matched_authors = int(row.get("Author match count") or 0)
+    submitted_author_count = int(row.get("Submitted author count") or 0)
+    author_method = _display_text(row.get("Author match method")) or "No comparison available"
+    reference = _display_text(row.get("Reference"))
+    submitted_title = _display_text(row.get("Extracted Title")) or extract_title(reference)
+    metadata_title = _display_text(row.get("Metadata Title"))
+    submitted_year = _display_text(row.get("Extracted Year")) or extract_year(reference)
+    metadata_year = _display_text(row.get("Crossref Year") or row.get("PubMed Year"))
+    submitted_journal = _display_text(row.get("Extracted Journal")) or extract_journal(reference)
+    metadata_journal = _display_text(row.get("Crossref Journal") or row.get("PubMed Journal"))
+
+    rows = [
+        {
+            "Part": "DOI",
+            "Submitted reference": submitted_doi or "—",
+            "Trusted record": metadata_doi or "—",
+            "Status": doi_status,
+            "What this means": doi_explanation,
+        },
+        {
+            "Part": "Authors",
+            "Submitted reference": submitted_authors or "—",
+            "Trusted record": metadata_authors or "—",
+            "Status": _part_status(row.get("author_ok"), submitted_authors, metadata_authors),
+            "What this means": (
+                f"{matched_authors} of {submitted_author_count} named authors matched. "
+                f"Method: {author_method}."
+            ),
+        },
+        {
+            "Part": "Year",
+            "Submitted reference": submitted_year or "—",
+            "Trusted record": metadata_year or "—",
+            "Status": _part_status(row.get("year_ok"), submitted_year, metadata_year),
+            "What this means": "Letter suffixes such as 2025a use the four-digit year.",
+        },
+        {
+            "Part": "Title",
+            "Submitted reference": submitted_title or "—",
+            "Trusted record": metadata_title or "—",
+            "Status": _part_status(row.get("title_ok"), submitted_title, metadata_title),
+            "What this means": (
+                f"Method: {_display_text(row.get('title_match_method')) or 'Not checked'}. "
+                f"Confidence: {_display_text(row.get('title_match_confidence')) or '—'}."
+            ),
+        },
+        {
+            "Part": "Journal",
+            "Submitted reference": submitted_journal or "—",
+            "Trusted record": metadata_journal or "—",
+            "Status": _part_status(row.get("journal_ok"), submitted_journal, metadata_journal),
+            "What this means": "Common abbreviations and punctuation are normalized.",
+        },
+        {
+            "Part": "Volume",
+            "Submitted reference": _display_text(row.get("Extracted Volume")) or "—",
+            "Trusted record": _display_text(row.get("Metadata Volume")) or "—",
+            "Status": _part_status(row.get("vol_ok"), row.get("Extracted Volume"), row.get("Metadata Volume")),
+            "What this means": "Compared when both records provide a volume.",
+        },
+        {
+            "Part": "Issue",
+            "Submitted reference": _display_text(row.get("Extracted Issue")) or "—",
+            "Trusted record": _display_text(row.get("Metadata Issue")) or "—",
+            "Status": _part_status(row.get("issue_ok"), row.get("Extracted Issue"), row.get("Metadata Issue")),
+            "What this means": "Compared when both records provide an issue.",
+        },
+        {
+            "Part": "Pages",
+            "Submitted reference": _display_text(row.get("Extracted Pages")) or "—",
+            "Trusted record": _display_text(row.get("Metadata Pages")) or "—",
+            "Status": _part_status(row.get("pages_ok"), row.get("Extracted Pages"), row.get("Metadata Pages")),
+            "What this means": "Page ranges and article locators are accepted.",
+        },
+    ]
+    return pd.DataFrame(rows)
+
+
+def style_part_by_part(df: pd.DataFrame):
+    colors = {
+        "Matched": "background-color: #D9FBE8; color: #086B4E; font-weight: 700",
+        "Different": "background-color: #FFE2DE; color: #9F241C; font-weight: 700",
+        "Not found": "background-color: #FFF3C4; color: #704700; font-weight: 700",
+        "Metadata only": "background-color: #DFF7F3; color: #034E5B; font-weight: 700",
+        "Not available": "background-color: #EDF2F1; color: #536B70; font-weight: 700",
+    }
+    return df.style.map(lambda value: colors.get(str(value), ""), subset=["Status"])
+
+
+def _result_tone(label: str) -> str:
+    label_lower = (label or "").lower()
+    if "possible falsification" in label_lower or "error" in label_lower:
+        return "danger"
+    if "suspicious" in label_lower or "manual review" in label_lower:
+        return "warning"
+    if "real" in label_lower:
+        return "real"
+    return "review"
+
+
+if run_clicked:
+    refs: list[str] = []
+    result_counts: dict = {}
+    error_text: str | None = None
+
+    try:
+        refs = ready_refs or split_references(user_input)
+        total = len(refs)
+        if not total:
+            st.warning("No complete references were detected.")
+        else:
+            progress = st.progress(0, text=f"Preparing to check {total} references")
 
             async def process_all(_refs):
                 results = []
-                total = len(_refs)
-                progress = st.progress(0)
                 async with httpx.AsyncClient(headers=DEFAULT_HEADERS) as client:
                     for i, ref in enumerate(_refs, start=1):
-                        result = await validate_single_ref(client, ref, debug_mode, check_reviews=check_reviews)
+                        progress.progress(
+                            (i - 1) / total,
+                            text=f"Checking reference {i} of {total}",
+                        )
+                        result = await validate_single_ref(
+                            client,
+                            ref,
+                            debug_mode,
+                            check_reviews=check_reviews,
+                        )
                         result["Ref #"] = i
                         results.append(result)
-                        progress.progress(i / total)
                 return results
 
             results = asyncio.run(process_all(refs))
-            df = pd.DataFrame(results)
-            counts = df["Validation Result"].value_counts()
-            result_counts = counts.to_dict()
+            progress.progress(1.0, text=f"Finished checking {total} references")
+            st.session_state["validation_results"] = results
+            st.session_state["last_checked_count"] = total
+            st.session_state["results_detect_reviews"] = check_reviews
 
-            st.subheader("📊 Summary")
-            st.write({
-                "Filename prefix": prefix,
-                "Total references": int(len(df)),
-                "AI tracking URL": int(df.get("AI URL flag", pd.Series(dtype=bool)).fillna(False).astype(bool).sum()),
-                "✅ Real": int(counts.get("✅ Real", 0)),
-                "🟡 Manual review": int(counts.get(MANUAL_REVIEW_LABEL, 0)),
-                "📄 Web Source (trusted)": int(counts.get("📄 Web Source (trusted)", 0)),
-                "📄 Web Source": int(counts.get("📄 Web Source", 0)),
-                "⚠ Suspicious": int(counts.get("⚠ Suspicious", 0)),
-                "❌ possible falsification": int(counts.get("❌ possible falsification", 0)),
-                "❌ Error": int(counts.get("❌ Error", 0)),
-            })
+            df_for_log = pd.DataFrame(results)
+            result_counts = df_for_log["Validation Result"].value_counts().to_dict()
 
-            used_fallback = False
-            df_display = build_display_df(df, view=table_view, include_review=check_reviews)
+    except Exception as exc:
+        error_text = str(exc)
+        st.error(
+            "Agent Ref could not finish this check. Your references are still "
+            "in the input box, so you can try again."
+        )
+        if debug_mode:
+            st.exception(exc)
 
-            try:
-                from streamlit import column_config
-                cfg = {}
-                if "Source link" in df_display.columns:
-                    cfg["Source link"] = column_config.LinkColumn("Source link")
-                if "DOI link" in df_display.columns:
-                    cfg["DOI link"] = column_config.LinkColumn("DOI link")
-                if "PubMed link" in df_display.columns:
-                    cfg["PubMed link"] = column_config.LinkColumn("PubMed link")
+    finally:
+        _log_run(
+            input_text=user_input,
+            split_refs=refs,
+            result_counts=result_counts,
+            error_text=error_text,
+        )
 
-                st.data_editor(
-                    df_display,
-                    column_config=cfg,
+
+stored_results = st.session_state.get("validation_results", [])
+if stored_results:
+    df = pd.DataFrame(stored_results)
+    counts = df["Validation Result"].value_counts()
+
+    total_count = int(len(df))
+    real_count = int(counts.get("✅ Real", 0))
+    manual_count = int(counts.get(MANUAL_REVIEW_LABEL, 0))
+    web_count = int(
+        counts.get("📄 Web Source (trusted)", 0)
+        + counts.get("📄 Web Source", 0)
+    )
+    suspicious_count = int(counts.get("⚠ Suspicious", 0))
+    false_count = int(counts.get("❌ possible falsification", 0))
+    error_count = int(counts.get("❌ Error", 0))
+
+    st.markdown('<div class="ar-section-kicker">Results</div>', unsafe_allow_html=True)
+    st.header(f"Summary for {total_count} references")
+
+    summary_items = [
+        ("all", total_count, "References checked"),
+        ("real", real_count, "Real"),
+        ("review", manual_count + web_count, "Manual review or web"),
+        ("suspicious", suspicious_count, "Suspicious"),
+        ("danger", false_count + error_count, "Possible falsification or error"),
+    ]
+    if "result_filter" not in st.session_state:
+        st.session_state["result_filter"] = "all"
+    available_filters = {
+        filter_key for filter_key, value, _ in summary_items
+        if filter_key == "all" or value > 0
+    }
+    if st.session_state["result_filter"] not in available_filters:
+        st.session_state["result_filter"] = "all"
+
+    def _set_result_filter(filter_key: str) -> None:
+        st.session_state["result_filter"] = filter_key
+
+    with st.container(key="summary_filters"):
+        summary_columns = st.columns(len(summary_items))
+        for column, (filter_key, value, label) in zip(summary_columns, summary_items):
+            with column:
+                st.button(
+                    f"**{value}**  \n{label}",
+                    key=f"summary_{filter_key}",
+                    type=(
+                        "primary"
+                        if st.session_state["result_filter"] == filter_key
+                        else "secondary"
+                    ),
+                    disabled=filter_key != "all" and value == 0,
                     use_container_width=True,
-                    height=560,
-                    hide_index=True
+                    help=(
+                        "Show every checked reference"
+                        if filter_key == "all"
+                        else f"Show {label.lower()} references"
+                    ),
+                    on_click=_set_result_filter,
+                    args=(filter_key,),
                 )
 
-            except Exception:
-                used_fallback = True
+    st.caption(
+        "Select a summary card to filter the reference dropdown below. "
+        "Select References checked to show the full list."
+    )
 
-                def highlight_row(val):
-                    if "Real" in val:
-                        return "background-color: #d4edda; color: #155724"
-                    if "Manual review" in val:
-                        return "background-color: #fff4cc; color: #7a5c00"
-                    if "Web Source" in val:
-                        return "background-color: #e2e3e5; color: #383d41"
-                    if "Suspicious" in val:
-                        return "background-color: #fff3cd; color: #856404"
-                    if "AI" in val:
-                        return "background-color: #f8d7da; color: #721c24"
-                    if "Error" in val:
-                        return "background-color: #fde2e1; color: #7a1b17"
-                    return ""
+    ai_tracking_count = int(
+        df.get("AI URL flag", pd.Series(dtype=bool))
+        .fillna(False)
+        .astype(bool)
+        .sum()
+    )
+    if ai_tracking_count:
+        st.info(
+            f"AI tracking was found in {ai_tracking_count} submitted "
+            f"{'URL' if ai_tracking_count == 1 else 'URLs'}. "
+            "This advisory flag does not change the score."
+        )
 
-                st.dataframe(
-                    df_display.style.map(highlight_row, subset=["Validation Result"]),
-                    use_container_width=True,
-                    height=560
-                )
-                st.caption("Note: Link columns shown as plain text in this Streamlit version.")
+    st.subheader("Review one reference")
+    active_filter = st.session_state.get("result_filter", "all")
 
-            today = date.today().isoformat()
+    def _is_in_active_filter(row: pd.Series) -> bool:
+        label = _display_text(row.get("Validation Result")).lower()
+        if active_filter == "all":
+            return True
+        if active_filter == "real":
+            return "real" in label and "manual" not in label
+        if active_filter == "review":
+            return "manual review" in label or "web source" in label
+        if active_filter == "suspicious":
+            return "suspicious" in label
+        return "possible falsification" in label or "error" in label
 
-            full_xlsx_filename = f"{prefix}validated_references_full_{today}.xlsx"
-            condensed_xlsx_filename = f"{prefix}validated_references_condensed_{today}.xlsx"
+    filtered_indices = [
+        index for index in range(len(df))
+        if _is_in_active_filter(df.iloc[index])
+    ]
+    filter_labels = {key: label for key, _, label in summary_items}
+    if active_filter != "all":
+        st.caption(
+            f"Showing {len(filtered_indices)} of {total_count}: "
+            f"{filter_labels[active_filter]}. Select References checked to clear the filter."
+        )
+    selected_index = st.selectbox(
+        "Select a reference",
+        options=filtered_indices,
+        format_func=lambda index: (
+            f"{int(df.iloc[index].get('Ref #', index + 1))} — "
+            f"{_display_text(df.iloc[index].get('Validation Result')).replace('✅ ', '').replace('⚠ ', '').replace('❌ ', '')} — "
+            f"{' '.join(_display_text(df.iloc[index].get('Reference')).split())[:95]}"
+        ),
+        label_visibility="collapsed",
+    )
+    selected = df.iloc[int(selected_index)]
+    selected_label = _display_text(selected.get("Validation Result"))
+    selected_score = int(selected.get("Score") or 0)
+    selected_tone = _result_tone(selected_label)
 
-            full_xlsx_bytes = build_excel_workbook(
+    st.markdown(
+        (
+            f'<article class="ar-reference-card {selected_tone}">'
+            '<div class="ar-reference-meta">'
+            f'<span class="ar-chip">{html.escape(selected_label)}</span>'
+            f'<span class="ar-chip">Evidence score: {selected_score} of 15</span>'
+            "</div>"
+            f'<div class="ar-reference-text">{html.escape(_display_text(selected.get("Reference")))}</div>'
+            "</article>"
+        ),
+        unsafe_allow_html=True,
+    )
+
+    validator_notes = _display_text(selected.get("Notes"))
+    st.markdown("**Validator notes**")
+    st.info(validator_notes or "No additional validator notes were returned.")
+    ai_notes = _display_text(selected.get("AL notes"))
+    if ai_notes:
+        st.warning(ai_notes)
+
+    detail_tabs = ["Part by part", "All references", "Technical details"]
+    tabs = st.tabs(detail_tabs)
+
+    with tabs[0]:
+        part_df = build_part_by_part_df(selected)
+        visible_part_df = part_df[
+            ["Part", "Submitted reference", "Trusted record", "Status"]
+        ]
+        st.dataframe(
+            style_part_by_part(visible_part_df),
+            use_container_width=True,
+            hide_index=True,
+            height=390,
+            column_config={
+                "Part": st.column_config.TextColumn("Part", width="small"),
+                "Submitted reference": st.column_config.TextColumn(
+                    "Submitted reference", width="large"
+                ),
+                "Trusted record": st.column_config.TextColumn(
+                    "Trusted record", width="large"
+                ),
+                "Status": st.column_config.TextColumn("Status", width="small"),
+            },
+        )
+
+    with tabs[1]:
+        overview = df[
+            ["Ref #", "Validation Result", "Score", "Reference", "Notes"]
+        ].copy()
+        overview.columns = [
+            "Reference",
+            "Result",
+            "Evidence score",
+            "Submitted reference",
+            "Explanation",
+        ]
+        st.dataframe(
+            overview,
+            use_container_width=True,
+            hide_index=True,
+            height=430,
+            column_config={
+                "Reference": st.column_config.NumberColumn(
+                    "Reference", width="small"
+                ),
+                "Result": st.column_config.TextColumn("Result", width="medium"),
+                "Evidence score": st.column_config.NumberColumn(
+                    "Evidence score", format="%d", width="small"
+                ),
+                "Submitted reference": st.column_config.TextColumn(
+                    "Submitted reference", width="large"
+                ),
+                "Explanation": st.column_config.TextColumn(
+                    "Explanation", width="large"
+                ),
+            },
+        )
+
+    with tabs[2]:
+        st.caption(
+            "These notes explain how each part of the selected reference is interpreted."
+        )
+        technical_explanations = part_df[
+            ["Part", "Status", "What this means"]
+        ]
+        st.dataframe(
+            style_part_by_part(technical_explanations),
+            use_container_width=True,
+            hide_index=True,
+            height=390,
+            column_config={
+                "Part": st.column_config.TextColumn("Part", width="small"),
+                "Status": st.column_config.TextColumn("Status", width="small"),
+                "What this means": st.column_config.TextColumn(
+                    "What this means", width="large"
+                ),
+            },
+        )
+        if debug_mode:
+            st.markdown("**Internal validation flags**")
+            debug_columns = [
+                "Ref #", "doi_explicit_ok", "doi_derived_ok", "year_ok",
+                "author_ok", "journal_ok", "title_ok", "vol_ok", "issue_ok",
+                "pages_ok", "metadata_conflict_count", "metadata_conflicts",
+                "title_match_method", "title_match_confidence",
+            ]
+            st.dataframe(
+                df[[column for column in debug_columns if column in df.columns]],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    st.markdown('<div class="ar-section-kicker">Export</div>', unsafe_allow_html=True)
+    st.header("Download results")
+    with st.container(border=True):
+        file_name_col, type_col, detail_col = st.columns([2.3, 1.25, 1.25])
+        with file_name_col:
+            prefix_input = st.text_input(
+                "Optional file name",
+                value=st.session_state.get("prefix", ""),
+                placeholder="For example: cohort-a",
+                help="This text is added to the start of the downloaded file name.",
+            )
+            st.session_state["prefix"] = prefix_input
+        with type_col:
+            export_type = st.selectbox("File type", ["Excel", "CSV"])
+        with detail_col:
+            export_detail = st.selectbox("Detail", ["Condensed", "Full"])
+
+        prefix = sanitize_prefix(prefix_input)
+        today = date.today().isoformat()
+        include_review = bool(
+            st.session_state.get("results_detect_reviews", False)
+        )
+
+        if export_type == "Excel":
+            export_bytes = build_excel_workbook(
                 df,
-                debug_mode=debug_mode,
-                view="Full",
-                include_review=check_reviews
+                debug_mode=debug_mode and export_detail == "Full",
+                view=export_detail,
+                include_review=include_review,
             )
-            st.download_button(
-                "Download full Excel workbook",
-                full_xlsx_bytes,
-                full_xlsx_filename,
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="download_full_xlsx"
+            export_filename = (
+                f"{prefix}validated_references_"
+                f"{export_detail.lower()}_{today}.xlsx"
             )
-
-            condensed_xlsx_bytes = build_excel_workbook(
+            export_mime = (
+                "application/vnd.openxmlformats-officedocument."
+                "spreadsheetml.sheet"
+            )
+        else:
+            export_df = build_display_df(
                 df,
-                debug_mode=False,
-                view="Condensed",
-                include_review=check_reviews
+                view=export_detail,
+                include_review=include_review,
             )
-            st.download_button(
-                "Download condensed Excel workbook",
-                condensed_xlsx_bytes,
-                condensed_xlsx_filename,
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="download_condensed_xlsx"
+            export_bytes = export_df.to_csv(index=False).encode("utf-8-sig")
+            export_filename = (
+                f"{prefix}validated_references_"
+                f"{export_detail.lower()}_{today}.csv"
             )
+            export_mime = "text/csv"
 
-            if used_fallback:
-                st.markdown("**Links:**")
-                link_rows = []
-                for _, r in df_display.iterrows():
-                    if r.get("Source link") or r.get("DOI link") or r.get("PubMed link"):
-                        parts = []
-                        if r.get("Source link"):
-                            parts.append(f"[Source]({r['Source link']})")
-                        if r.get("DOI link"):
-                            parts.append(f"[DOI]({r['DOI link']})")
-                        if r.get("PubMed link"):
-                            parts.append(f"[PubMed/PMC]({r['PubMed link']})")
+        st.download_button(
+            f"Download {export_detail.lower()} {export_type}",
+            export_bytes,
+            export_filename,
+            export_mime,
+            use_container_width=True,
+        )
 
-                        link_rows.append(f"- Ref {int(r['Ref #'])}: " + " | ".join(parts))
-                if link_rows:
-                    st.markdown("\n".join(link_rows))
 
-        except Exception as e:
-            error_text = str(e)
-            raise
-
-        finally:
-            _log_run(
-                input_text=user_input,
-                split_refs=refs,
-                result_counts=result_counts,
-                error_text=error_text
-            )
-
-    else:
-        st.warning("Please paste some references first.")
-
-FOOTER = """
-<style>
-.app-footer {
-  position: fixed;
-  right: 12px;
-  bottom: 10px;
-  padding: 6px 10px;
-  font-size: 0.8rem;
-  opacity: 0.65;
-  z-index: 9999;
-  background: transparent;
-}
-.app-footer a { text-decoration: none; }
-</style>
-
-<div class="app-footer">
-  Created by <b>Mark Hintze</b> · <a href="mailto:FoxHin5431@users.noreply.github.com">FoxHin5431@users.noreply.github.com</a>
-</div>
-"""
-st.markdown(FOOTER, unsafe_allow_html=True)
+st.markdown(
+    """
+    <div style="margin-top:3rem;padding-top:1rem;border-top:1px solid #C9DDD9;color:#536B70;font-size:.86rem">
+      Agent Ref beta · Created by Mark Hintze ·
+      <a href="mailto:FoxHin5431@users.noreply.github.com">FoxHin5431@users.noreply.github.com</a>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
