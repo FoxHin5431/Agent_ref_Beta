@@ -69,6 +69,16 @@ class FullAuthorExtractionTests(unittest.TestCase):
 
         self.assertTrue(core.has_bibliographic_shape(reference))
 
+    def test_parenthesized_year_after_volume_is_not_an_issue(self) -> None:
+        volume, issue, pages, page_start, page_end = core.extract_vol_issue_pages(
+            STERN_REFERENCE
+        )
+
+        self.assertEqual(volume, "42")
+        self.assertEqual(issue, "")
+        self.assertEqual(pages, "134-9")
+        self.assertEqual((page_start, page_end), ("134", "9"))
+
     def test_organisational_author_is_preserved(self) -> None:
         cases = [
             ("The Open University (2025a) '1.2 What are clouds?'.", ["The Open University"]),
