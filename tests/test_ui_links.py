@@ -43,9 +43,14 @@ class UiLinkTests(unittest.TestCase):
         self.assertIn('st.session_state["result_filter"]', source)
         self.assertIn('options=filtered_indices', source)
         self.assertIn(
-            "Select a summary card to filter the reference dropdown below.",
+            "Select a summary card to filter the references below.",
             source,
         )
+        self.assertIn('if active_filter == "review":', source)
+        self.assertIn('visible_part_df = part_df[["Part", "Status"]].copy()', source)
+        self.assertIn('selected.get("Source URL")', source)
+        self.assertIn('st.column_config.LinkColumn(', source)
+        self.assertIn('df.iloc[filtered_indices][overview_columns]', source)
         self.assertIn('["Excel", "CSV"]', source)
         self.assertIn('["Condensed", "Full"]', source)
 

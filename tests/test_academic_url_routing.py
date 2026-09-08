@@ -1,0 +1,138 @@
+from __future__ import annotations
+
+import unittest
+from unittest.mock import patch
+
+from core_loader import load_beta_core
+
+
+PUBMED_REFERENCE = (
+    "Boutari, C., DeMarsilis, A. and Mantzoros, C.S. (2023) "
+    "‘Obesity and diabetes’, Diabetes Research and Clinical Practice. "
+    "Available at: https://pubmed.ncbi.nlm.nih.gov/37356727/ "
+    "(Accessed: 12 May 2026)."
+)
+
+PMC_REFERENCE = (
+    "Colberg, S.R., Sigal, R.J., Yardley, J.E., Riddell, M.C., "
+    "Dunstan, D.W., Dempsey, P.C., Horton, E.S., Castorino, K. and "
+    "Tate, D.F. (2016) ‘Physical activity/exercise and diabetes: A "
+    "position statement of the American Diabetes Association’. Available "
+    "at: https://pmc.ncbi.nlm.nih.gov/articles/PMC6908414/ "
+    "(Accessed: 12 May 2026)."
+)
+
+WHO_REFERENCE = (
+    "World Health Organization (WHO) (2024a) Diabetes. Available at: "
+    "https://www.who.int/news-room/fact-sheets/detail/diabetes "
+    "(Accessed: 12 May 2026)."
+)
+
+
+class FakeResponse:
+    status_code = 200
+
+    def json(self):
+        return {
+            "result": {
+                "37356727": {
+                    "fulljournalname": "Diabetes Research and Clinical Practice",
+                    "pubdate": "2023",
+                    "title": "Obesity and diabetes",
+                    "authors": [
+                        {"name": "Boutari C"},
+                        {"name": "DeMarsilis A"},
+                        {"name": "Mantzoros CS"},
+                    ],
+                }
+            }
+        }
+
+
+class FakePmcResponse:
+    status_code = 200
+
+    def json(self):
+        return {
+            "result": {
+                "uids": ["PMC6908414"],
+                "PMC6908414": {
+                    "fulljournalname": "Diabetes Care",
+                    "pubdate": "2016",
+                    "title": (
+                        "Physical activity/exercise and diabetes: A position "
+                        "statement of the American Diabetes Association"
+                    ),
+                    "authors": [
+                        {"name": "Colberg SR"},
+                        {"name": "Sigal RJ"},
+                        {"name": "Yardley JE"},
+                        {"name": "Riddell MC"},
+                        {"name": "Dunstan DW"},
+                        {"name": "Dempsey PC"},
+                        {"name": "Horton ES"},
+                        {"name": "Castorino K"},
+                        {"name": "Tate DF"},
+                    ],
+                    "articleids": [{"idtype": "pmid", "value": "27979891"}],
+                },
+            }
+        }
+
+
+class AcademicUrlRoutingTests(unittest.IsolatedAsyncioTestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.core = load_beta_core()
+
+    def test_pubmed_and_pmc_urls_are_identifiers_not_generic_web_sources(self) -> None:
+        self.assertEqual(self.core.extract_pmid(PUBMED_REFERENCE), "37356727")
+        self.assertEqual(self.core.extract_pmcid(PMC_REFERENCE), "PMC6908414")
+        self.assertFalse(
+            self.core.looks_like_org_web_source(
+                PUBMED_REFERENCE,
+                primary_domain="pubmed.ncbi.nlm.nih.gov",
+            )
+        )
+        self.assertFalse(
+            self.core.looks_like_org_web_source(
+                PMC_REFERENCE,
+                primary_domain="pmc.ncbi.nlm.nih.gov",
+            )
+        )
+
+    def test_genuine_organisational_page_still_requires_manual_review(self) -> None:
+        self.assertTrue(
+            self.core.looks_like_org_web_source(
+                WHO_REFERENCE,
+                primary_domain="who.int",
+            )
+        )
+
+    async def test_pubmed_url_continues_through_academic_validation(self) -> None:
+        async def fetch_pubmed(_client, pmid):
+            self.assertEqual(pmid, "37356727")
+            return FakeResponse()
+
+        with patch.object(self.core, "fetch_pubmed", fetch_pubmed):
+            result = await self.core.validate_single_ref(None, PUBMED_REFERENCE)
+
+        self.assertEqual(result["PubMed ID"], "37356727")
+        self.assertEqual(result["Validation Result"], "✅ Real")
+        self.assertNotEqual(result["Validation Result"], self.core.MANUAL_REVIEW_LABEL)
+
+    async def test_pmc_article_without_submitted_journal_uses_title_identity(self) -> None:
+        async def fetch_pmc(_client, pmcid):
+            self.assertEqual(pmcid, "PMC6908414")
+            return FakePmcResponse()
+
+        with patch.object(self.core, "fetch_pmc", fetch_pmc):
+            result = await self.core.validate_single_ref(None, PMC_REFERENCE)
+
+        self.assertEqual(result["PubMed ID"], "PMC6908414")
+        self.assertTrue(result["title_ok"])
+        self.assertEqual(result["Validation Result"], "✅ Real")
+
+
+if __name__ == "__main__":
+    unittest.main()

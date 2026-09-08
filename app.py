@@ -490,6 +490,32 @@ def extract_pmcid(ref: str):
     if m:
         return m.group(1).upper()
     return ""
+
+def extract_pmid(ref: str) -> str:
+    """Extract a PMID supplied directly or through a PubMed article URL."""
+    if not ref:
+        return ""
+
+    explicit = re.search(r"\bPMID:\s*(\d+)\b", ref, flags=re.I)
+    if explicit:
+        return explicit.group(1)
+
+    # PubMed URLs are stable identifiers for journal articles. Treating the
+    # numeric path as a PMID prevents otherwise complete journal references
+    # from being caught by the generic organisational/web-source shortcut.
+    for url in extract_urls(ref):
+        try:
+            parsed = urllib.parse.urlparse(url)
+            host = (parsed.netloc or "").lower().split(":", 1)[0]
+            if host == "pubmed.ncbi.nlm.nih.gov":
+                match = re.match(r"^/(\d+)(?:/|$)", parsed.path or "")
+                if match:
+                    return match.group(1)
+        except (TypeError, ValueError):
+            continue
+
+    return ""
+
 def extract_urls(ref: str):
     if not ref:
         return []
@@ -618,7 +644,7 @@ def looks_like_org_web_source(ref: str, primary_domain: str = "") -> bool:
 
     has_identifier = bool(
         extract_doi(ref)
-        or re.search(r"\bPMID:\s*\d+\b", ref, flags=re.I)
+        or extract_pmid(ref)
         or extract_pmcid(ref)
     )
 
@@ -1156,7 +1182,7 @@ def score_result(
     title_ok=False, vol_ok=False, issue_ok=False, pages_ok=False,
     doi_invalid=False, manual_review_web=False,
     metadata_conflicts=None, strong_identity_match=False,
-    author_conflict=False,
+    author_conflict=False, trusted_article_id=False,
 ):
     weighted_score = compute_weighted_score(
         doi_explicit_ok=doi_explicit_ok, doi_derived_ok=doi_derived_ok,
@@ -1219,9 +1245,20 @@ def score_result(
         if id_match and biblio_one:
             return "✅ Real", "", weighted_score
 
-    # A discovered DOI can populate the comparison flags, but the reference
-    # must pass the ordinary DOI-less metadata rule to be marked Real.
-    if (not doi_explicit_ok) and year_ok and author_ok and journal_ok:
+    # A discovered DOI or PubMed/PMC identifier can populate the comparison
+    # flags, but the reference must pass the ordinary metadata rule to be
+    # marked Real. When the submitted reference genuinely omits the journal,
+    # a strong title match can stand in for it; a supplied-but-wrong journal
+    # must still fail this gate.
+    journal_or_missing_journal_title_ok = bool(
+        journal_ok or (trusted_article_id and (not extract_journal(ref)) and title_ok)
+    )
+    if (
+        (not doi_explicit_ok)
+        and year_ok
+        and author_ok
+        and journal_or_missing_journal_title_ok
+    ):
         return "✅ Real", "", weighted_score
 
     reasons = []
@@ -1414,7 +1451,7 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
     ref_journal = extract_journal(ref_clean).lower()
     title = extract_title(ref_clean)
     doi_val = extract_doi(ref)
-    pmid_match = re.search(r"\bPMID:\s*(\d+)\b", ref, flags=re.I)
+    pmid_val = extract_pmid(ref)
     pmcid_val = extract_pmcid(ref)
     shape_ok = has_bibliographic_shape(ref_clean)
 
@@ -1503,7 +1540,7 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
             "Review Notes": "",
         }
 
-    if not (doi_val or pmid_match or pmcid_val) and primary_domain and not scholarly_like:
+    if not (doi_val or pmid_val or pmcid_val) and primary_domain and not scholarly_like:
         label = "📄 Web Source (trusted)" if trusted_web else "📄 Web Source"
         return {
             "Reference": ref,
@@ -1632,8 +1669,7 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
             if doi_source != "heuristic":
                 doi_source = "explicit"
 
-        elif pmid_match:
-            pmid_val = pmid_match.group(1)
+        elif pmid_val:
             resp = await fetch_pubmed(client, pmid_val)
             if resp.status_code == 200:
                 summary = resp.json().get("result", {}).get(pmid_val, {})
@@ -1655,6 +1691,11 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
                 )
                 author_ok = author_comparison["ok"]
                 journal_ok = journals_match(ref_journal, pubmed_journal)
+                title_ok, title_similarity_score, title_match_method, title_match_confidence = evaluate_title_match(
+                    title,
+                    metadata_title,
+                    ref_clean,
+                )
                 if check_reviews:
                     resp_xml = await fetch_pubmed_efetch_xml(client, pmid_val)
                     if resp_xml.status_code == 200:
@@ -1690,6 +1731,11 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
                 )
                 author_ok = author_comparison["ok"]
                 journal_ok = journals_match(ref_journal, pubmed_journal)
+                title_ok, title_similarity_score, title_match_method, title_match_confidence = evaluate_title_match(
+                    title,
+                    metadata_title,
+                    ref_clean,
+                )
                 pubmed_id = pmcid_val
 
                 articleids = summary.get("articleids") or []
@@ -1933,6 +1979,7 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
         metadata_conflicts=metadata_conflicts,
         strong_identity_match=strong_identity_match,
         author_conflict=author_conflict,
+        trusted_article_id=bool(pmid_val or pmcid_val),
     )
 
     if doi_invalid:
@@ -1952,15 +1999,15 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
         reason = (reason + ("; " if reason else "") +
                   "DOI resolves but metadata (author/title/journal/year/vol/issue/pages) mismatches").strip("; ")
 
-    if (not doi_val and not pmid_match) and 'match_reason' in locals() and match_reason:
+    if (not doi_val and not pmid_val) and 'match_reason' in locals() and match_reason:
         reason = (reason + ("; " if reason else "") + match_reason)
 
-    if (not doi_val and not pmid_match) and primary_domain and looks_scholarly_like(ref_clean):
+    if (not doi_val and not pmid_val) and primary_domain and looks_scholarly_like(ref_clean):
         if result in {"⚠ Suspicious", "❌ possible falsification"}:
             reason = (reason + ("; " if reason else "") +
                       "journal-like reference with URL; attempted Crossref query but no acceptable match").strip("; ")
 
-    if (not doi_val and not pmid_match and not primary_domain) and result in {"⚠ Suspicious", "❌ possible falsification"}:
+    if (not doi_val and not pmid_val and not primary_domain) and result in {"⚠ Suspicious", "❌ possible falsification"}:
         reason = (reason + ("; " if reason else "") + "no DOI/PMID/URL present; manual review recommended").strip("; ")
 
     if trusted_web and primary_domain and ("Web Source" in result or "Manual review" in result):
@@ -3236,7 +3283,7 @@ if stored_results:
                 )
 
     st.caption(
-        "Select a summary card to filter the reference dropdown below. "
+        "Select a summary card to filter the references below. "
         "Select References checked to show the full list."
     )
 
@@ -3318,57 +3365,77 @@ if stored_results:
 
     with tabs[0]:
         part_df = build_part_by_part_df(selected)
-        visible_part_df = part_df[
-            ["Part", "Submitted reference", "Trusted record", "Status"]
-        ]
+        if active_filter == "review":
+            visible_part_df = part_df[["Part", "Status"]].copy()
+            visible_part_df["Source link"] = ""
+            if not visible_part_df.empty:
+                visible_part_df.loc[visible_part_df.index[0], "Source link"] = (
+                    _display_text(selected.get("Source URL")).strip()
+                )
+        else:
+            visible_part_df = part_df[
+                ["Part", "Submitted reference", "Trusted record", "Status"]
+            ]
+
+        part_column_config = {
+            "Part": st.column_config.TextColumn("Part", width="small"),
+            "Submitted reference": st.column_config.TextColumn(
+                "Submitted reference", width="large"
+            ),
+            "Trusted record": st.column_config.TextColumn(
+                "Trusted record", width="large"
+            ),
+            "Status": st.column_config.TextColumn("Status", width="small"),
+        }
+        if active_filter == "review":
+            part_column_config["Source link"] = st.column_config.LinkColumn(
+                "Source link",
+                display_text="Open link",
+                width="small",
+            )
+
         st.dataframe(
             style_part_by_part(visible_part_df),
             use_container_width=True,
             hide_index=True,
             height=390,
-            column_config={
-                "Part": st.column_config.TextColumn("Part", width="small"),
-                "Submitted reference": st.column_config.TextColumn(
-                    "Submitted reference", width="large"
-                ),
-                "Trusted record": st.column_config.TextColumn(
-                    "Trusted record", width="large"
-                ),
-                "Status": st.column_config.TextColumn("Status", width="small"),
-            },
+            column_config=part_column_config,
         )
 
     with tabs[1]:
-        overview = df[
-            ["Ref #", "Validation Result", "Score", "Reference", "Notes"]
-        ].copy()
-        overview.columns = [
+        overview_columns = [
+            "Ref #", "Validation Result", "Score", "Reference", "Notes"
+        ]
+        overview_labels = [
             "Reference",
             "Result",
             "Evidence score",
             "Submitted reference",
             "Explanation",
         ]
+        overview = df.iloc[filtered_indices][overview_columns].copy()
+        overview.columns = overview_labels
+        overview_column_config = {
+            "Reference": st.column_config.NumberColumn(
+                "Reference", width="small"
+            ),
+            "Result": st.column_config.TextColumn("Result", width="medium"),
+            "Evidence score": st.column_config.NumberColumn(
+                "Evidence score", format="%d", width="small"
+            ),
+            "Submitted reference": st.column_config.TextColumn(
+                "Submitted reference", width="large"
+            ),
+            "Explanation": st.column_config.TextColumn(
+                "Explanation", width="large"
+            ),
+        }
         st.dataframe(
             overview,
             use_container_width=True,
             hide_index=True,
             height=430,
-            column_config={
-                "Reference": st.column_config.NumberColumn(
-                    "Reference", width="small"
-                ),
-                "Result": st.column_config.TextColumn("Result", width="medium"),
-                "Evidence score": st.column_config.NumberColumn(
-                    "Evidence score", format="%d", width="small"
-                ),
-                "Submitted reference": st.column_config.TextColumn(
-                    "Submitted reference", width="large"
-                ),
-                "Explanation": st.column_config.TextColumn(
-                    "Explanation", width="large"
-                ),
-            },
+            column_config=overview_column_config,
         )
 
     with tabs[2]:
