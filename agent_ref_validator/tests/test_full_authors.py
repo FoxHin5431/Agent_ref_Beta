@@ -26,6 +26,26 @@ STERN_METADATA = {
     "page": "134-139",
 }
 
+PYSEK_REFERENCE = (
+    "Pyšek, P. and Prach, K (1995) "
+    "‘Invasion dynamics of Impatiens glandulifera - a century of spreading reconstructed’, "
+    "Biological Conservation, 74(1), pp. 41- 48. "
+    "Available at: https://doi.org/10.1016/0006-3207(95)00013-T"
+)
+
+PYSEK_METADATA = {
+    "DOI": "10.1016/0006-3207(95)00013-T",
+    "title": [
+        "Invasion dynamics of Impatiens glandulifera — A century of spreading reconstructed"
+    ],
+    "container-title": ["Biological Conservation"],
+    "issued": {"date-parts": [[1995]]},
+    "author": [{"family": "Pyšek"}, {"family": "Prach"}],
+    "volume": "74",
+    "issue": "1",
+    "page": "41-48",
+}
+
 
 class FakeResponse:
     status_code = 200
@@ -54,6 +74,27 @@ class FullAuthorExtractionTests(unittest.TestCase):
             (
                 "Kim, J., Kim, H. and Bang, D. (2025) 'OpenIDS2'.",
                 ["Kim", "Kim", "Bang"],
+            ),
+        ]
+
+        for reference, expected in cases:
+            with self.subTest(reference=reference):
+                self.assertEqual(core.extract_author_surnames(reference), expected)
+
+    def test_unicode_names_are_extracted_without_character_allowlists(self) -> None:
+        cases = [
+            ("Pyšek, P. and Prach, K. (1995) 'Title'.", ["Pyšek", "Prach"]),
+            (
+                "Dvořák, J., García-Márquez, M. and O’Reilly, S. (2020) 'Title'.",
+                ["Dvořák", "García-Márquez", "O’Reilly"],
+            ),
+            (
+                "Sørensen, L., Łukaszewski, P. and Nguyễn, T. (2021) 'Title'.",
+                ["Sørensen", "Łukaszewski", "Nguyễn"],
+            ),
+            (
+                "Παπαδόπουλος, Ν. and Иванов, И. (2022) 'Title'.",
+                ["Παπαδόπουλος", "Иванов"],
             ),
         ]
 
@@ -109,6 +150,20 @@ class FullAuthorComparisonTests(unittest.TestCase):
         self.assertEqual(comparison["matched_count"], 3)
         self.assertFalse(wrong_middle["ok"])
         self.assertEqual(wrong_middle["matched_count"], 2)
+
+    def test_unicode_and_accent_folded_surnames_compare_safely(self) -> None:
+        comparison = core.compare_author_lists(
+            ["Pyšek", "Dvořák", "García-Márquez"],
+            ["Pysek", "Dvorak", "Garcia-Marquez"],
+        )
+        greek_case_variant = core.compare_author_lists(
+            ["Παπαδόπουλος"],
+            ["ΠΑΠΑΔΌΠΟΥΛΟΣ"],
+        )
+
+        self.assertTrue(comparison["ok"])
+        self.assertEqual(comparison["matched_count"], 3)
+        self.assertTrue(greek_case_variant["ok"])
 
     def test_et_al_checks_every_explicitly_named_author(self) -> None:
         metadata = ["Bekaii-Saab", "Yaeger", "Spira", "Johnson", "Lee"]
@@ -191,6 +246,31 @@ class FullAuthorPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["Author match count"], 1)
         self.assertEqual(result["Validation Result"], "⚠ Suspicious")
         self.assertIn("author list conflicts", result["Notes"])
+
+    async def test_unicode_pysek_reference_passes_the_full_pipeline(self) -> None:
+        class PysekResponse:
+            status_code = 200
+
+            def json(self) -> dict:
+                return {"message": PYSEK_METADATA}
+
+        async def fetch_crossref(_client, _doi):
+            return PysekResponse()
+
+        async def doi_resolves(_client, _doi):
+            return True
+
+        with (
+            patch.object(core, "fetch_crossref_doi", fetch_crossref),
+            patch.object(core, "check_doi_org_head", doi_resolves),
+        ):
+            result = await core.validate_single_ref(None, PYSEK_REFERENCE)
+
+        self.assertEqual(result["Extracted Authors"], "Pyšek, Prach")
+        self.assertEqual(result["Metadata Authors"], "Pyšek, Prach")
+        self.assertTrue(result["author_ok"])
+        self.assertEqual(result["Score"], 15)
+        self.assertEqual(result["Validation Result"], "✅ Real")
 
 
 if __name__ == "__main__":

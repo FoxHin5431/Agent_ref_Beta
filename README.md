@@ -47,3 +47,38 @@ If secrets are not configured, logging is disabled automatically.
 
 - Do not commit `.streamlit/secrets.toml` (it is ignored).
 - CSV/XLSX exports are generated at runtime.
+
+## Shared validator release
+
+All online validation uses `agent_ref_validator/core.py`, release **2026.09.09.2**.
+The canonical source is [reference_checker](https://github.com/FoxHin5431/reference_checker/tree/main/agent_ref_validator).
+Beta, Regex Inspector and Agent-Ref-002 carry generated, byte-identical releases
+of that package so private-repository credentials are not needed at runtime.
+Do not edit validation logic in the consumer repositories or restore an old
+standalone checker. Interfaces and pilot database logging remain app-specific.
+
+Each result includes `Validator Version` and `Validator SHA256`; the interface
+also displays the release identity. The release includes the ScienceDirect PII
+fix and the pilot's Unicode author handling. Adding an Available-at ScienceDirect
+URL no longer substitutes a guessed DOI for the normal bibliographic lookup.
+
+Run the release and interface checks:
+
+```powershell
+python -m agent_ref_validator.verify
+python -m unittest discover -s agent_ref_validator/tests -v
+python -m unittest discover -s tests -v
+```
+
+GitHub Actions runs these checks on pushes and pull requests. `release.json`
+records hashes of the runtime and regression files so accidental edits fail CI.
+Future releases are authored in the canonical repository: bump
+`VALIDATOR_VERSION`, then run `python tools/sync_validator.py --write` from that
+checkout with all three consumer checkouts present. The command refuses local
+consumer drift, tests the canonical validator, copies the release, and verifies
+parity. Run it without `--write` for read-only cross-repository parity checking.
+Use repeated `--target PATH` arguments when checkouts are stored elsewhere.
+Commit and publish all four repositories together after their checks pass.
+Streamlit apps tracking `main` redeploy from those commits.
+
+Verified deployment mapping: [agent-ref-beta.streamlit.app](https://agent-ref-beta.streamlit.app/) → `main` / `app.py`.

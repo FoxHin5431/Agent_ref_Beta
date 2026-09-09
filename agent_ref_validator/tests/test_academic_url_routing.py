@@ -28,6 +28,14 @@ WHO_REFERENCE = (
     "(Accessed: 12 May 2026)."
 )
 
+ONS_REFERENCE = (
+    "Office for National Statistics. 2019registrations. "
+    "https://www.ons.gov.uk/peoplepopulationandcommunity/"
+    "birthsdeathsandmarriages/deaths/bulletins/"
+    "dementiaandalzheimersdiseasedeathsincludingcomorbidities"
+    "englandandwales/2019registrations"
+)
+
 
 class FakeResponse:
     status_code = 200
@@ -108,6 +116,11 @@ class AcademicUrlRoutingTests(unittest.IsolatedAsyncioTestCase):
                 primary_domain="who.int",
             )
         )
+
+    async def test_organisational_author_fallback_accepts_unicode_pattern(self) -> None:
+        result = await self.core.validate_single_ref(None, ONS_REFERENCE)
+
+        self.assertEqual(result["Validation Result"], self.core.MANUAL_REVIEW_LABEL)
 
     async def test_pubmed_url_continues_through_academic_validation(self) -> None:
         async def fetch_pubmed(_client, pmid):

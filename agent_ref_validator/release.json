@@ -1,0 +1,20 @@
+{
+  "version": "2026.09.09.2",
+  "source_repository": "https://github.com/FoxHin5431/reference_checker",
+  "source_path": "agent_ref_validator",
+  "files": {
+    "__init__.py": "5214229d68fb1dfe7406ce911b3470cf09a79e02bf8af8b730b31b6af7f310bd",
+    "core.py": "d3b70e404dde27afd79f5d9d4e6cab6fcc69ab8524b5979e801a15a17fc089c8",
+    "exports.py": "f704841d45d6fc297f455aca644fd90dd03186f1870554da5d8fb466221d21a2",
+    "tests/core_loader.py": "33db6ba39bf9bf254de63dbd236fa836a970dc31857ba7c0332db036ed025780",
+    "tests/test_academic_url_routing.py": "ad1583387355959739dc699c7486c3a6efc5838883da80ed082920ba3326c1bf",
+    "tests/test_derived_doi.py": "dbd0930589c484164bdb57c254c742acec63bc68b95db1284eeb82733d27e38d",
+    "tests/test_full_authors.py": "8d844c44011cb56f2559f58917b0d894793e3b1ae2672ee44dff789299e4b8e8",
+    "tests/test_reference_splitting.py": "367495531746f26ea799952f324f86e98ba4c9327c4842e75e7036b711a30fdc",
+    "tests/test_sciencedirect_urls.py": "39f7f761372394e60bfeab2dac2a5c451fd68658c1215be26378d64e64698220",
+    "tests/test_title_validation.py": "a512fdd80330ff4e9a7d29ea4f0ef75c3d6d72db4550a431be2eed1274b7470c",
+    "tests/test_utm_tracking.py": "72054ec0e83bc343a771d8584dba443ca796f2a9eb1be2bdb6d616973c7d119b",
+    "tests/test_year_suffixes.py": "bb3e147e04a49ed370f33fba3ad10b5e5b99b3ffa5c8d9644e5e1d2895efab15",
+    "verify.py": "3cfcc6f6454b6ab6de329df1e3f3524da5e97912090b0926c8ea8bc0fc538ff2"
+  }
+}

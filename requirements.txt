@@ -2,3 +2,6 @@ streamlit>=1.31
 pandas>=2.0
 httpx>=0.24
 xlsxwriter>=3.1
+
+regex
+openpyxl
