@@ -36,6 +36,20 @@ ONS_REFERENCE = (
     "englandandwales/2019registrations"
 )
 
+CHEN_REFERENCE = (
+    "Chen, J., Spracklen, C.N., Marenne, G. et al. (2021) "
+    "‘The trans-ancestral genomic architecture of glycemic traits’, "
+    "Nature Genetics, 53(6), pp. 840–860. Available at: "
+    "https://pubmed.ncbi.nlm.nih.gov/34059833/ (Accessed: 10 August 2026)."
+)
+
+GRACNER_REFERENCE = (
+    "Gracner, T., Boone, C. and Gertler, P.J. (2024) ‘Exposure to sugar "
+    "rationing in the first 1000 days of life protected against chronic "
+    "disease’, Science, 386(6725), pp. 1043–1048. Available at: "
+    "https://pubmed.ncbi.nlm.nih.gov/39480913/ (Accessed: 10 August 2026"
+)
+
 
 class FakeResponse:
     status_code = 200
@@ -86,6 +100,17 @@ class FakePmcResponse:
                 },
             }
         }
+
+
+class FakePubmedArticleResponse:
+    status_code = 200
+
+    def __init__(self, pmid, summary):
+        self.pmid = pmid
+        self.summary = summary
+
+    def json(self):
+        return {"result": {self.pmid: self.summary}}
 
 
 class AcademicUrlRoutingTests(unittest.IsolatedAsyncioTestCase):
@@ -145,6 +170,62 @@ class AcademicUrlRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["PubMed ID"], "PMC6908414")
         self.assertTrue(result["title_ok"])
         self.assertEqual(result["Validation Result"], "✅ Real")
+
+    async def test_pubmed_volume_issue_and_pages_are_compared(self) -> None:
+        cases = {
+            "34059833": (
+                CHEN_REFERENCE,
+                {
+                    "fulljournalname": "Nature Genetics",
+                    "pubdate": "2021 Jun",
+                    "title": "The trans-ancestral genomic architecture of glycemic traits",
+                    "authors": [
+                        {"name": "Chen J"},
+                        {"name": "Spracklen CN"},
+                        {"name": "Marenne G"},
+                        {"name": "Varshney A"},
+                    ],
+                    "volume": "53",
+                    "issue": "6",
+                    "pages": "840-860",
+                },
+            ),
+            "39480913": (
+                GRACNER_REFERENCE,
+                {
+                    "fulljournalname": "Science (New York, N.Y.)",
+                    "pubdate": "2024 Nov 29",
+                    "title": (
+                        "Exposure to sugar rationing in the first 1000 days of "
+                        "life protected against chronic disease"
+                    ),
+                    "authors": [
+                        {"name": "Gracner T"},
+                        {"name": "Boone C"},
+                        {"name": "Gertler PJ"},
+                    ],
+                    "volume": "386",
+                    "issue": "6725",
+                    "pages": "1043-1048",
+                },
+            ),
+        }
+
+        async def fetch_pubmed(_client, pmid):
+            _reference, summary = cases[pmid]
+            return FakePubmedArticleResponse(pmid, summary)
+
+        with patch.object(self.core, "fetch_pubmed", fetch_pubmed):
+            for pmid, (reference, _summary) in cases.items():
+                with self.subTest(pmid=pmid):
+                    result = await self.core.validate_single_ref(None, reference)
+                    self.assertEqual(result["Extracted Volume"], result["Metadata Volume"])
+                    self.assertEqual(result["Extracted Issue"], result["Metadata Issue"])
+                    self.assertTrue(result["pages_ok"])
+                    self.assertTrue(result["vol_ok"])
+                    self.assertTrue(result["issue_ok"])
+                    self.assertEqual(result["metadata_conflict_count"], 0)
+                    self.assertEqual(result["Validation Result"], "✅ Real")
 
 
 if __name__ == "__main__":

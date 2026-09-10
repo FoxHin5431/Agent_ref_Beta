@@ -11,7 +11,7 @@ from difflib import SequenceMatcher
 import unicodedata
 import xml.etree.ElementTree as ET
 
-VALIDATOR_VERSION = "2026.09.09.2"
+VALIDATOR_VERSION = "2026.09.10.1"
 # Normalize line endings so Windows and Linux identify the same source.
 VALIDATOR_SHA256 = hashlib.sha256(Path(__file__).read_text(encoding="utf-8").encode("utf-8")).hexdigest()
 
@@ -1681,6 +1681,9 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
                     metadata_title,
                     ref_clean,
                 )
+                vol_ok = bool(ref_vol and cr_vol and ref_vol == cr_vol)
+                issue_ok = bool(ref_issue and cr_issue and ref_issue == cr_issue)
+                pages_ok = pages_match(ref_pstart, ref_pend, cr_pages)
                 if check_reviews:
                     resp_xml = await fetch_pubmed_efetch_xml(client, pmid_val)
                     if resp_xml.status_code == 200:
@@ -1721,6 +1724,9 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
                     metadata_title,
                     ref_clean,
                 )
+                vol_ok = bool(ref_vol and cr_vol and ref_vol == cr_vol)
+                issue_ok = bool(ref_issue and cr_issue and ref_issue == cr_issue)
+                pages_ok = pages_match(ref_pstart, ref_pend, cr_pages)
                 pubmed_id = pmcid_val
 
                 articleids = summary.get("articleids") or []

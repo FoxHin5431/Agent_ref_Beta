@@ -50,7 +50,7 @@ If secrets are not configured, logging is disabled automatically.
 
 ## Shared validator release
 
-All online validation uses `agent_ref_validator/core.py`, release **2026.09.09.2**.
+All online validation uses `agent_ref_validator/core.py`, release **2026.09.10.1**.
 The canonical source is [reference_checker](https://github.com/FoxHin5431/reference_checker/tree/main/agent_ref_validator).
 Beta, Regex Inspector and Agent-Ref-002 carry generated, byte-identical releases
 of that package so private-repository credentials are not needed at runtime.
