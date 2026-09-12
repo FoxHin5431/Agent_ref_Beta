@@ -1,0 +1,39 @@
+ The LIGO Scientific Collaboration et al. (2016) ‘Observation of Gravitational Waves from a Binary Black Hole Merger’. arXiv. https://doi.org/10.48550/arXiv.1602.03837
+
+ Planck Collaboration, Aghanim, N., Akrami, Y. et al. (2018) ‘Planck 2018 results. VI. Cosmological parameters’. arXiv. https://arxiv.org/pdf/1807.06209
+
+Jones, M. (2019) ‘Relating Causal and Probabilistic Approaches to Contextuality’. arXiv. arXiv:1906.02716
+
+ The ATLAS Collaboration (2012) ‘Observation of a new particle in the search for the Standard Model Higgs boson with the ATLAS detector at the LHC’. arXiv. https://arxiv.org/abs/1207.7214
+
+ The CMS Collaboration (2012) ‘Observation of a new boson at a mass of 125 GeV with the CMS experiment at the LHC’. arXiv. https://doi.org/10.48550/arXiv.1207.7235
+
+ Planck Collaboration, Ade, P.A.R., Aghanim, N. et al. (2015) ‘Planck 2015 results. XIII. Cosmological parameters’. arXiv. https://arxiv.org/pdf/1502.01589
+
+ Planck Collaboration et al. (2013) ‘Planck 2013 results. XVI. Cosmological parameters’. arXiv. arXiv:1303.5076
+
+ BICEP2 Collaboration, Ade, P.A.R., Aikin, R.W. et al. (2014) ‘BICEP2 I: Detection Of B-mode Polarization at Degree Angular Scales’. arXiv. https://arxiv.org/abs/1403.3985v1
+
+ The NNPDF Collaboration et al. (2017) ‘Parton distributions from high-precision collider data’. arXiv. https://doi.org/10.48550/arXiv.1706.00428
+
+Franzosi, R., Giampaolo, S.M., Illuminati, F. (2010) ‘Quantum localization and bound state formation in Bose-Einstein condensates’. arXiv. https://arxiv.org/pdf/1007.2416
+
+Berti, E. et al. (2009) ‘Quasinormal modes of black holes and black branes’. arXiv. arXiv:0905.2975
+
+Greif, T.H., Johnson, J.L., Bromm, V. (2007) ‘Towards the First Galaxies’. arXiv. https://arxiv.org/abs/0709.0102v1
+
+Cacciari, M. et al. (2011) ‘FastJet user manual’. arXiv. https://doi.org/10.48550/arXiv.1111.6097
+
+Ilderton, A., Johansson, P., Marklund, M. (2011) ‘Pair annihilation in laser pulses: optical vs. XFEL regimes’. arXiv. https://arxiv.org/pdf/1105.3475
+
+Verde, L. et al. (2019) ‘Tensions between the Early and the Late Universe’. arXiv. arXiv:1907.10625
+
+Riess, A.G., Filippenko, A.V., Challis, P. et al. (1998) ‘Observational Evidence from Supernovae for an Accelerating Universe and a Cosmological Constant’. arXiv. https://arxiv.org/abs/astro-ph/9805201
+
+Maldacena, J.M. (1997) ‘The Large N Limit of Superconformal Field Theories and Supergravity’. arXiv. https://doi.org/10.48550/arXiv.hep-th/9711200
+
+Kiefer, C. (1994) ‘Semiclassical Gravity and the Problem of Time’. arXiv. https://arxiv.org/pdf/gr-qc/9405039
+
+Shor, P.W. (1995) ‘Polynomial-Time Algorithms for Prime Factorization and Discrete Logarithms on a Quantum Computer’. arXiv. arXiv:quant-ph/9508027
+
+Papanikolaou, S., Luijten, E., Fradkin, E. (2006) ‘Quantum criticality, lines of fixed points, and phase separation in doped two-dimensional quantum dimer models’. arXiv. https://arxiv.org/abs/cond-mat/0607316

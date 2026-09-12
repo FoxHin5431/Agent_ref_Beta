@@ -1,5 +1,6 @@
 # Agent Ref interface. Validation lives in agent_ref_validator/core.py.
 import streamlit as st
+import os
 import pandas as pd
 import re
 import html
@@ -42,10 +43,11 @@ result by itself.
   webpage that cannot be judged like a journal article.
 - **Web source:** The item is a general webpage rather than a conventional
   academic publication.
-- **Suspicious:** Some evidence agrees, but the reference is incomplete,
-  unverifiable or contains a meaningful conflict.
-- **Possible falsification:** The reference has a failed identifier, a fabricated
-  pairing or several confirmed conflicts.
+- **Unable to verify:** Parsing, lookup or metadata could not establish the source
+  reliably. These references remain in the review queue.
+- **Suspicious:** The retrieved record contains a meaningful contradiction.
+- **Possible falsification:** An identifier points to different authors and title,
+  or several publication details contradict an identified record.
 
 Confirmed conflicts are considered before the score. Missing information is not
 treated as a contradiction.
@@ -53,10 +55,10 @@ treated as a contradiction.
 
 AUTHORS_GUIDE_MD = """
 Agent Ref extracts every surname supplied by the student and compares it with
-Crossref, PubMed or PMC metadata.
+Crossref, PubMed, PMC, arXiv or NASA ADS metadata.
 
-- A complete list must have the same first author and at least **80% coverage in
-  both directions**.
+- Every supplied author must match, including the first author; the supplied
+  list must cover at least **80% of the metadata authors**.
 - With **et al.**, every author named before *et al.* must match the corresponding
   author in the trusted record.
 - A resolved DOI with a conflicting author list is sent for review rather than
@@ -422,6 +424,15 @@ st.markdown(
 )
 
 st.sidebar.caption(f"Validator {VALIDATOR_VERSION} · {VALIDATOR_SHA256[:12]}")
+
+def configured_ads_token():
+    try:
+        return str(st.secrets.get("ADS_API_TOKEN", "") or os.environ.get("ADS_API_TOKEN", ""))
+    except FileNotFoundError:
+        return os.environ.get("ADS_API_TOKEN", "")
+
+ads_api_token = configured_ads_token()
+st.sidebar.caption("arXiv: enabled · NASA ADS: " + ("configured" if ads_api_token else "token required"))
 if st.session_state.get("validator_sha256") != VALIDATOR_SHA256:
     st.session_state["validation_results"] = []
     st.session_state["last_checked_count"] = 0
@@ -538,6 +549,22 @@ st.caption(
     "Paste a reference list from Word, a PDF or another document. "
     "Line breaks inside a reference are treated as spaces when possible."
 )
+
+physics_examples = Path(__file__).resolve().parent / "examples" / "physics"
+if (physics_examples / "arxiv-20.txt").is_file():
+    with st.expander("Physics Beta test pack"):
+        st.write("20 real arXiv physics references, including DOI, PDF, identifier and older-format examples. "
+                 "These checks verify the cited record; suitability and later publication are not assessed.")
+        example_text = (physics_examples / "arxiv-20.txt").read_text(encoding="utf-8")
+        if st.button("Load 20 arXiv examples", key="load_arxiv_examples"):
+            st.session_state["ref_input"] = example_text
+            st.session_state["validation_results"] = []
+        st.download_button("Download 20 references", example_text, "arxiv-20.txt", mime="text/plain")
+        altered_text = (physics_examples / "arxiv-4-altered.txt").read_text(encoding="utf-8")
+        st.download_button("Download 4 deliberately altered references", altered_text,
+                           "arxiv-4-altered.txt", mime="text/plain")
+        st.caption("The altered pack changes one author, one title, one year and one identifier. "
+                   "None should be marked Real. First-time arXiv checks may take about a minute.")
 
 user_input = st.text_area(
     "References",
@@ -686,6 +713,7 @@ def build_display_df(df: pd.DataFrame, *, view: str, include_review: bool) -> pd
         "Domain", "Domains",
         "Source URL",
         "Extracted DOI", "DOI Source",
+        "Metadata Source", "Metadata Record URL", "Metadata DOI", "Metadata Year", "Metadata Journal", "arXiv ID", "ADS ID",
         "Crossref DOI", "Crossref Journal", "Crossref Year",
         "PubMed ID", "PubMed Journal", "PubMed Year",
         "Notes",
@@ -734,7 +762,7 @@ def _part_status(matches: bool, submitted, metadata) -> str:
 
 def build_part_by_part_df(row: pd.Series) -> pd.DataFrame:
     submitted_doi = _display_text(row.get("Extracted DOI")).strip()
-    metadata_doi = _display_text(row.get("Crossref DOI")).strip()
+    metadata_doi = _display_text(row.get("Metadata DOI") or row.get("Crossref DOI")).strip()
     if bool(row.get("doi_explicit_ok")):
         doi_status = "Matched"
         doi_explanation = "The DOI supplied in the reference resolves."
@@ -742,8 +770,8 @@ def build_part_by_part_df(row: pd.Series) -> pd.DataFrame:
         doi_status = "Metadata only"
         doi_explanation = "Agent Ref found this DOI; it did not add points to the score."
     elif submitted_doi:
-        doi_status = "Different"
-        doi_explanation = "The supplied DOI could not be confirmed."
+        doi_status = "Not verified"
+        doi_explanation = "The supplied DOI could not be confirmed; this alone does not establish fabrication."
     else:
         doi_status = "Not found"
         doi_explanation = "No DOI was supplied or recovered."
@@ -757,9 +785,9 @@ def build_part_by_part_df(row: pd.Series) -> pd.DataFrame:
     submitted_title = _display_text(row.get("Extracted Title")) or extract_title(reference)
     metadata_title = _display_text(row.get("Metadata Title"))
     submitted_year = _display_text(row.get("Extracted Year")) or extract_year(reference)
-    metadata_year = _display_text(row.get("Crossref Year") or row.get("PubMed Year"))
+    metadata_year = _display_text(row.get("Metadata Year") or row.get("Crossref Year") or row.get("PubMed Year"))
     submitted_journal = _display_text(row.get("Extracted Journal")) or extract_journal(reference)
-    metadata_journal = _display_text(row.get("Crossref Journal") or row.get("PubMed Journal"))
+    metadata_journal = _display_text(row.get("Metadata Journal") or row.get("Crossref Journal") or row.get("PubMed Journal"))
 
     rows = [
         {
@@ -825,12 +853,24 @@ def build_part_by_part_df(row: pd.Series) -> pd.DataFrame:
             "What this means": "Page ranges and article locators are accepted.",
         },
     ]
+    if row.get("arXiv ID") or row.get("ADS ID"):
+        rows.insert(0, {"Part": "Identifier", "Submitted reference": row.get("arXiv ID") or row.get("ADS ID"),
+            "Trusted record": row.get("Metadata Record URL") or "—", "Status": "Not verified",
+            "What this means": "Checked using the cited database identifier."})
+    evidence = row.get("Comparison evidence")
+    if isinstance(evidence, dict):
+        for part in rows:
+            field = evidence.get(part["Part"].lower())
+            if field:
+                part["Status"] = {"matched": "Matched", "conflicting": "Different", "unknown": "Not verified"}[field["status"]]
+                part["What this means"] = field["reason"]
     return pd.DataFrame(rows)
 
 
 def style_part_by_part(df: pd.DataFrame):
     colors = {
         "Matched": "background-color: #D9FBE8; color: #086B4E; font-weight: 700",
+        "Not verified": "background-color: #FFF3CD; color: #856404; font-weight: 700",
         "Different": "background-color: #FFE2DE; color: #9F241C; font-weight: 700",
         "Not found": "background-color: #FFF3C4; color: #704700; font-weight: 700",
         "Metadata only": "background-color: #DFF7F3; color: #034E5B; font-weight: 700",
@@ -876,6 +916,7 @@ if run_clicked:
                             ref,
                             debug_mode,
                             check_reviews=check_reviews,
+                            ads_token=ads_api_token,
                         )
                         result["Ref #"] = i
                         results.append(result)
@@ -915,7 +956,7 @@ if stored_results:
 
     total_count = int(len(df))
     real_count = int(counts.get("✅ Real", 0))
-    manual_count = int(counts.get(MANUAL_REVIEW_LABEL, 0))
+    manual_count = int(counts.get(MANUAL_REVIEW_LABEL, 0)) + int(counts.get(UNVERIFIED_LABEL, 0))
     web_count = int(
         counts.get("📄 Web Source (trusted)", 0)
         + counts.get("📄 Web Source", 0)
@@ -930,7 +971,7 @@ if stored_results:
     summary_items = [
         ("all", total_count, "References checked"),
         ("real", real_count, "Real"),
-        ("review", manual_count + web_count, "Manual review or web"),
+        ("review", manual_count + web_count, "Review required or web"),
         ("suspicious", suspicious_count, "Suspicious"),
         ("danger", false_count + error_count, "Possible falsification or error"),
     ]
@@ -997,7 +1038,7 @@ if stored_results:
         if active_filter == "real":
             return "real" in label and "manual" not in label
         if active_filter == "review":
-            return "manual review" in label or "web source" in label
+            return "manual review" in label or "web source" in label or "unable to verify" in label
         if active_filter == "suspicious":
             return "suspicious" in label
         return "possible falsification" in label or "error" in label

@@ -1,5 +1,34 @@
 # Agent Ref (Beta)
 
+## Physics database trial — 12 September 2026
+
+This Beta candidate uses shared validator **2026.09.12.2-beta2**, including the
+previous locally tested evidence-review fixes. It adds arXiv lookups (including
+arXiv DOIs via their own metadata sources) and NASA ADS. Set `ADS_API_TOKEN` in
+Streamlit secrets to enable ADS; the token is sent only to the ADS API and is not
+included in results. arXiv needs no token. A sidebar indicator reports whether
+ADS is configured; failed lookups remain visible as Unable to verify.
+
+Open **Physics Beta test pack**, choose **Load 20 arXiv examples**, then
+**Check references**. The two downloads provide 20 real examples and four
+deliberately altered controls. The examples should produce 20 Real results when
+the metadata services are available. None of the altered controls should pass.
+
+This release verifies the cited record. It does not check assignment suitability
+or search for a subsequent published version. First-time arXiv requests are
+spaced at least three seconds apart; successful metadata is cached for 24 hours.
+
+The user requested a staged rollout: publish this candidate to Beta only before
+promoting it to the pilot. The pilot, Inspector and 002 remain on their hosted
+release. This temporary trial supersedes the simultaneous-release instructions
+below. The canonical source remains `reference_checker/agent_ref_validator`.
+
+To verify the candidate locally from the workspace root:
+
+```powershell
+& reference_checker/.venv/Scripts/python.exe reference_checker/tools/sync_validator.py --target Agent_ref_Beta
+```
+
 Streamlit app for validating reference lists using DOI (Crossref + doi.org), PubMed/PMC, and heuristic checks.
 
 The interface includes a **Reference debugging tool** link to the hosted Regex

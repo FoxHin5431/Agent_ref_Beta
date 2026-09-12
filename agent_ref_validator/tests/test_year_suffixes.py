@@ -29,7 +29,7 @@ STERN_CASES = [
         "'Multiple roles of timing in somite formation.' "
         "Seminars in cell & developmental biology vol. 42 (2015a): 134-9. "
         "doi:10.1016/j.semcdb.2015.06.002",
-        13,
+        14,  # Publication-tail parsing now recovers the journal as well.
         {
             "DOI": "10.1016/j.semcdb.2015.06.002",
             "title": ["Multiple roles of timing in somite formation"],
@@ -45,7 +45,7 @@ STERN_CASES = [
         "Stern, Claudio. 'The embryo reunited with its membranes in Göttingen.' "
         "Development (Cambridge, England) vol. 142,16 (2015b): 2727-9. "
         "doi:10.1242/dev.124719",
-        12,
+        13,  # Explicit volume parsing recovers 142 without using title numbers.
         {
             "DOI": "10.1242/dev.124719",
             "title": ["The embryo reunited with its membranes in Göttingen"],

@@ -1,7 +1,7 @@
 """Shared Excel export for Agent Ref interfaces."""
 import io
 import pandas as pd
-from .core import MANUAL_REVIEW_LABEL
+from .core import MANUAL_REVIEW_LABEL, UNVERIFIED_LABEL
 
 def compute_doi_score(row: pd.Series) -> int:
     """
@@ -67,7 +67,9 @@ def build_excel_workbook(
             "Extracted Authors", "Metadata Authors", "Author match method",
             "Author match count", "Submitted author count", "Metadata author count",
             "Reference", "Domain", "Domains", "Source URL", "Validator Version", "Validator SHA256",
-            "Extracted DOI", "DOI Source", "Crossref DOI", "Crossref Journal", "Crossref Year",
+            "Extracted DOI", "DOI Source", "Metadata Source", "Metadata Record URL", "Metadata DOI",
+            "Metadata Year", "Metadata Journal", "Source Type", "arXiv ID", "ADS ID",
+            "Crossref DOI", "Crossref Journal", "Crossref Year",
             "PubMed ID", "PubMed Journal", "PubMed Year", "Notes"
         ]
 
@@ -77,7 +79,7 @@ def build_excel_workbook(
             "Author metadata coverage",
             "title_ok", "title_similarity", "title_match_confidence", "title_match_method",
             "strong_identity_match", "vol_ok", "issue_ok", "pages_ok", "metadata_conflict_count",
-            "metadata_conflicts",
+            "metadata_conflicts", "Comparison evidence", "Lookup issue", "Review required",
         ]
         desired = base_order + (debug_order if debug_mode else [])
         cols = [c for c in desired if c in export_df.columns]
@@ -116,7 +118,8 @@ def build_excel_workbook(
             "⚠ Suspicious",
             "❌ possible falsification",
             "❌ Error",
-            MANUAL_REVIEW_LABEL
+            MANUAL_REVIEW_LABEL,
+            UNVERIFIED_LABEL
         ])
         | export_df["AI URL flag"].fillna(False).astype(bool)
     ].copy()
@@ -209,6 +212,9 @@ def build_excel_workbook(
                 })
                 ws.conditional_format(first, col_idx, last, col_idx, {
                     "type": "text", "criteria": "containing", "value": "Manual review", "format": fmt_manual
+                })
+                ws.conditional_format(first, col_idx, last, col_idx, {
+                    "type": "text", "criteria": "containing", "value": "Unable to verify", "format": fmt_manual
                 })
                 ws.conditional_format(first, col_idx, last, col_idx, {
                     "type": "text", "criteria": "containing", "value": "Web Source", "format": fmt_web

@@ -176,8 +176,9 @@ class DerivedDoiPipelineTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["Score"], 7)
         self.assertTrue(result["strong_identity_match"])
-        self.assertEqual(result["metadata_conflict_count"], 3)
-        self.assertEqual(result["metadata_conflicts"], "volume, issue, pages")
+        # Single-word journal extraction now also exposes the wrong journal.
+        self.assertEqual(result["metadata_conflict_count"], 4)
+        self.assertEqual(result["metadata_conflicts"], "journal, volume, issue, pages")
         self.assertEqual(result["Validation Result"], "❌ possible falsification")
         self.assertIn("major metadata conflict", result["Notes"])
         self.assertIn("derived DOI used for metadata only", result["Notes"])

@@ -1,20 +1,23 @@
 {
-  "version": "2026.09.10.1",
+  "version": "2026.09.12.2-beta2",
   "source_repository": "https://github.com/FoxHin5431/reference_checker",
   "source_path": "agent_ref_validator",
   "files": {
     "__init__.py": "5214229d68fb1dfe7406ce911b3470cf09a79e02bf8af8b730b31b6af7f310bd",
-    "core.py": "25a43dcc2184f0cb7b2817153bec82a4f97232df0cf9081458e95e5b1a346150",
-    "exports.py": "f704841d45d6fc297f455aca644fd90dd03186f1870554da5d8fb466221d21a2",
+    "core.py": "383da5721d2d51a4b35b081575dc08fc74ddeb7bf1ed90f5af613c572428810e",
+    "exports.py": "270699a1a04325dd66790dc001fc30fb20460747a3f416f36991c5efe06d5d29",
     "tests/core_loader.py": "33db6ba39bf9bf254de63dbd236fa836a970dc31857ba7c0332db036ed025780",
+    "tests/reported_cases.py": "b56d4ec26095f31977787af573cea3d7f58ce4538531a21962d2b7b1cc24fae7",
     "tests/test_academic_url_routing.py": "179dca7e4ef2143095d3927e1bf75ff023cfbffe37cc566502f2baee7fd0c96c",
-    "tests/test_derived_doi.py": "dbd0930589c484164bdb57c254c742acec63bc68b95db1284eeb82733d27e38d",
+    "tests/test_derived_doi.py": "40190160dac9ef607309b2820282c63d81c4dbfa0981e9e244bf54413079a9a9",
+    "tests/test_evidence_review.py": "1bad1cb0cc420d2bef5b5cecd16fc1c5236951f4062ec0557c8ca47e2c31618a",
     "tests/test_full_authors.py": "8d844c44011cb56f2559f58917b0d894793e3b1ae2672ee44dff789299e4b8e8",
+    "tests/test_physics_sources.py": "a06554b614adb7e74f14280b850b81856ab4ff478e53bba9b29e49a2ba512f35",
     "tests/test_reference_splitting.py": "367495531746f26ea799952f324f86e98ba4c9327c4842e75e7036b711a30fdc",
     "tests/test_sciencedirect_urls.py": "39f7f761372394e60bfeab2dac2a5c451fd68658c1215be26378d64e64698220",
     "tests/test_title_validation.py": "a512fdd80330ff4e9a7d29ea4f0ef75c3d6d72db4550a431be2eed1274b7470c",
     "tests/test_utm_tracking.py": "72054ec0e83bc343a771d8584dba443ca796f2a9eb1be2bdb6d616973c7d119b",
-    "tests/test_year_suffixes.py": "bb3e147e04a49ed370f33fba3ad10b5e5b99b3ffa5c8d9644e5e1d2895efab15",
+    "tests/test_year_suffixes.py": "d87b5591b33a0fc0790d2dd10b3b626601315fd88702fdb0fd0bd4dda323d59b",
     "verify.py": "3cfcc6f6454b6ab6de329df1e3f3524da5e97912090b0926c8ea8bc0fc538ff2"
   }
 }

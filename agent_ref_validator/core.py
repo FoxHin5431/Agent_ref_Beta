@@ -10,8 +10,11 @@ import urllib.parse
 from difflib import SequenceMatcher
 import unicodedata
 import xml.etree.ElementTree as ET
+import os
+import threading
+import time
 
-VALIDATOR_VERSION = "2026.09.10.1"
+VALIDATOR_VERSION = "2026.09.12.2-beta2"
 # Normalize line endings so Windows and Linux identify the same source.
 VALIDATOR_SHA256 = hashlib.sha256(Path(__file__).read_text(encoding="utf-8").encode("utf-8")).hexdigest()
 
@@ -45,6 +48,7 @@ ORG_SOURCE_HINTS = {
 }
 
 MANUAL_REVIEW_LABEL = "🟡 Manual review – web source / report / dataset"
+UNVERIFIED_LABEL = "🟡 Unable to verify — review required"
 
 AI_URL_NOTE = "AI tracking parameter detected: utm_source=chatgpt"
 
@@ -229,6 +233,19 @@ def extract_author_surnames(ref: str) -> list[str]:
     if not prefix:
         return []
 
+    collective = re.match(r"^(.+?\b(?:Collaboration|Consortium|Team))(?=,|\s+et\s+al|$)", prefix, re.I)
+    if collective:
+        remainder = ET_AL_RE.sub("", prefix[collective.end():]).strip(" ,.;:()")
+        return [collective.group(1)] + (extract_author_surnames(remainder + " (2000)") if remainder else [])
+
+    # The supplied surname-period-initials style is equivalent to a comma.
+    # Limit this to author tokens, not periods in titles or arbitrary prose.
+    prefix = unicode_re.sub(
+        r"(^|[,;]\s*|\band\s+|&\s+)([\p{Lu}][\p{L}\p{M}'’\-]+)\.\s+"
+        r"(?=[\p{Lu}](?:[\p{Lu}.\s\-]*)(?:,|;|$))",
+        r"\1\2, ", prefix,
+    )
+
     leading_organisation = text.split(".", 1)[0].strip(" ,.;:()[]")
     if not year_match and len(leading_organisation.split()) >= 2 and re.search(
         r"\b(?:university|organisation|organization|service|institute|agency|"
@@ -300,7 +317,7 @@ def extract_author_surnames(ref: str) -> list[str]:
 
     # Organisational author before an early year, e.g. ``The Open University``.
     if year_match and year_match.start() <= 160:
-        organisation = text[: year_match.start()].strip(" ,.;:()[]")
+        organisation = ET_AL_RE.sub("", text[: year_match.start()]).strip(" ,.;:()[]")
         if organisation and not re.search(r"\b(?:vol|volume|journal|pp?)\.?\b", organisation, re.I):
             return [organisation]
 
@@ -332,6 +349,9 @@ def parse_year_token(value: str) -> tuple[int | None, str]:
 
 def normalize_journal_name(name: str) -> str:
     name = (name or "").strip().lower()
+    name = re.sub(r"^the\s+", "", name)
+    name = re.split(r"\s*:\s*official publication\b", name, maxsplit=1)[0]
+    name = re.sub(r"\s*\[preprint\]\s*", "", name, flags=re.I)
     key = re.sub(r"[^\w\s]", "", name)
     key = re.sub(r"\s+", " ", key)
     if key in JOURNAL_NORMALIZATION:
@@ -341,7 +361,28 @@ def normalize_journal_name(name: str) -> str:
             return full
     return name
 
+def quoted_publication_tail(ref: str) -> str | None:
+    """Return citation details after a quoted title, excluding lookup URLs."""
+    title = extract_title(ref)
+    if not title:
+        return None
+    position = ref.find(title)
+    end = position + len(title)
+    if position <= 0 or end >= len(ref):
+        return None
+    if ref[:position].rstrip()[-1:] not in {"'", "‘", '"', "“"}:
+        return None
+    if ref[end] not in {"'", "’", '"', "”"}:
+        return None
+    tail = ref[end + 1:].lstrip(" ,.;")
+    return re.split(r"\bavailable\s+(?:at|online)|https?://|\bdoi:|\bPMCID?:", tail, maxsplit=1, flags=re.I)[0].strip()
+
+
 def extract_journal(ref: str) -> str:
+    tail = quoted_publication_tail(ref)
+    if tail is not None:
+        journal = re.split(r",\s*(?=\d|vol\b|pp?\.|pg\b)|\s+vol\.?\s+\d", tail, maxsplit=1, flags=re.I)[0]
+        return normalize_journal_name(journal.strip(" ,.;"))
     s = re.sub(r"doi:.*", "", ref, flags=re.I)
     s = re.sub(r"pmid:.*", "", s, flags=re.I)
     s = re.sub(r"available at:.*", "", s, flags=re.I)
@@ -349,6 +390,12 @@ def extract_journal(ref: str) -> str:
     if not yr:
         return ""
     after = s[yr.end():].strip()
+    quoted_journal = re.search(
+        r"['’\"”]\s*[,\.]?\s*([^,'’\"“”\n]+?)\s*,\s*(?:\d|vol\b)",
+        after, flags=re.I,
+    )
+    if quoted_journal:
+        return normalize_journal_name(quoted_journal.group(1).strip())
     parts = re.split(r"[.,]", after)
     for i, part in enumerate(parts):
         if re.search(r"\d", part):
@@ -430,6 +477,20 @@ def clean_doi_value(raw: str) -> str:
 def extract_doi(ref: str):
     if not ref:
         return None
+
+    # Cochrane's article view suffix is a URL route, not part of the DOI.
+    # Rewrite only recognised routes; DOI suffixes may legitimately contain '/'.
+    for url in extract_urls(ref):
+        parsed = urllib.parse.urlparse(url)
+        host = (parsed.hostname or "").lower()
+        if host in {"www.cochranelibrary.com", "cochranelibrary.com",
+                    "www-cochranelibrary-com.libezproxy.open.ac.uk"}:
+            match = re.fullmatch(
+                r"/cdsr/doi/(10\.1002/[^/]+)/(?:full|abstract|pdf)/?",
+                urllib.parse.unquote(parsed.path), re.I,
+            )
+            if match:
+                ref = ref.replace(url, "https://doi.org/" + match.group(1))
 
     patterns = [
         r"\[(10\.\d{4,9}/[^\s<>\]]+)\]\(https?://(?:dx\.)?doi\.org/\1\)",
@@ -716,7 +777,8 @@ def compare_author_lists(
 ) -> dict:
     """Compare all explicitly supplied authors with trusted metadata.
 
-    Complete lists need at least 80% coverage in both directions. With
+    Every explicitly supplied author must match; metadata coverage must be at
+    least 80%. With
     ``et al.``, each explicitly named author must match the corresponding
     leading metadata author, while omitted names are deliberately ignored.
     """
@@ -790,7 +852,7 @@ def compare_author_lists(
 
     result["ok"] = bool(
         result["first_author_ok"]
-        and submitted_coverage >= 0.8
+        and submitted_coverage == 1.0
         and metadata_coverage >= 0.8
     )
     result["method"] = "full author list" if result["ok"] else "full-list mismatch"
@@ -879,8 +941,9 @@ def evaluate_title_match(
 # --- volume/issue/pages parsing & comparison ---
 
 def extract_vol_issue_pages(ref: str):
-    s = ref
-    m_vi = re.search(r"\b(\d{1,4})\s*\(\s*([A-Za-z0-9\-]+)\s*\)", s)
+    tail = quoted_publication_tail(ref)
+    s = tail if tail is not None else re.split(r"https?://|\bdoi:", ref, maxsplit=1, flags=re.I)[0]
+    m_vi = re.search(r"(?<![\w\-])(\d{1,4})\s*\(\s*([A-Za-z0-9\-]+)\s*\)", s)
     vol = m_vi.group(1) if m_vi else ""
     issue = m_vi.group(2) if m_vi else ""
     if issue and YEAR_TOKEN_RE.fullmatch(issue):
@@ -888,11 +951,18 @@ def extract_vol_issue_pages(ref: str):
         # the publication year rather than an issue number.
         issue = ""
 
-    m_pp = re.search(r"\bpp?\.\s*([0-9]+(?:\s*[-–]\s*[0-9]+)?)", s, flags=re.I)
+    if not vol:
+        explicit_volume = re.search(r"\bvol(?:ume)?\.?\s+(\d{1,4})\b", s, re.I)
+        vol = explicit_volume.group(1) if explicit_volume else ""
+    if not issue:
+        explicit_issue = re.search(r"\b(?:is|issue)\.?\s+([A-Za-z0-9\-]+)\b", s, re.I)
+        issue = explicit_issue.group(1) if explicit_issue else ""
+
+    m_pp = re.search(r"\b(?:pp?\.|pg\.?)\s*([0-9]+(?:\s*[-–]\s*[0-9]+)?)", s, flags=re.I)
     if not m_pp:
-        m_pp = re.search(r"\b\d{1,4}\s*\(\s*[A-Za-z0-9\-]+\s*\)\s*[,:]?\s*([0-9]+(?:\s*[-–]\s*[0-9]+)?)", s)
+        m_pp = re.search(r"(?<![\w\-])\d{1,4}\s*\(\s*[A-Za-z0-9\-]+\s*\)\s*[,:]?\s*([0-9]+(?:\s*[-–]\s*[0-9]+)?)", s)
     if not m_pp:
-        m_pp = re.search(r"\b([0-9]+(?:\s*[-–]\s*[0-9]+))\b", s)
+        m_pp = re.search(r"(?<![\w\-)\]])([0-9]+(?:\s*[-–]\s*[0-9]+))\b", s)
 
     pages = m_pp.group(1) if m_pp else ""
 
@@ -1050,6 +1120,7 @@ def split_references(text: str):
     def looks_complete(ref: str) -> bool:
         identifier_or_url = bool(
             extract_doi(ref)
+            or extract_arxiv_id(ref)
             or extract_pmcid(ref)
             or re.search(r"\bPMID:\s*\d+\b", ref, flags=re.I)
             or extract_urls(ref)
@@ -1156,6 +1227,119 @@ def collect_confirmed_metadata_conflicts(
         if submitted_present and metadata_present and not matches
     ]
 
+
+def author_extraction_issue(ref: str, extracted: list[str]) -> str:
+    """Detect visible author tokens missed by the supported parser styles."""
+    prefix = re.split(r"[‘“\"]|\b(?:19|20)\d{2}\b", ref, maxsplit=1)[0]
+    apparent = unicode_re.findall(
+        r"(?:^|[,;]\s*|\band\s+|&\s+)([\p{Lu}][\p{L}\p{M}'’\-]+)"
+        r"\s*[,.:]\s*(?=[\p{Lu}](?:[\p{Lu}.\s\-]*)(?:[,;()]|$))",
+        prefix,
+    )
+    names = {normalize_author_name(name) for name in extracted}
+    if any(normalize_author_name(name) not in names for name in apparent):
+        return "incomplete author extraction: supplied author tokens were not parsed"
+    return ""
+
+
+def metadata_author_issue(authors: object) -> str:
+    """Recognise professional descriptions misplaced in personal author records.
+
+    Keep raw metadata intact; do not guess corrected family names or remove
+    inconvenient authors. This is intentionally a bounded quality check.
+    """
+    for author in authors or []:
+        if not isinstance(author, dict):
+            continue
+        given = str(author.get("given") or "")
+        name = str(author.get("name") or "")
+        if (author.get("family") and re.search(r"\b(?:professor|prof\.|dr\s+\w)\b", given, re.I)) or re.search(
+            r"\bhead\s*,?\s*(?:of\s+)?(?:the\s+)?department\b", name, re.I
+        ):
+            return "unusable author metadata: professional description in an author field"
+    return ""
+
+
+def journal_comparison_issue(submitted: str, metadata: str, matches: bool) -> str:
+    if matches or not submitted or not metadata:
+        return ""
+    # An abbreviation is uncertain only when its tokens can align with the
+    # record in order. A different full journal name remains a contradiction.
+    words = re.findall(r"[a-z]+", submitted.lower())
+    trusted = re.findall(r"[a-z]+", metadata.lower())
+    position = 0
+    shortened = False
+    for word in words:
+        found = next((i for i in range(position, len(trusted)) if trusted[i].startswith(word)), None)
+        if found is None:
+            return ""
+        shortened |= word != trusted[found]
+        position = found + 1
+    if len(words) >= 2 and shortened:
+        return "journal abbreviation could not be verified"
+    return ""
+
+
+def comparison_evidence(submitted, metadata, matches: bool, *, issue="", source="") -> dict:
+    if issue:
+        status, reason = "unknown", issue
+    elif matches:
+        status, reason = "matched", "comparison matched"
+    elif not submitted or not metadata:
+        status = "unknown"
+        reason = "submitted value not extracted or absent" if not submitted else "metadata unavailable"
+    else:
+        status, reason = "conflicting", "supplied value differs from the retrieved record"
+    return {"status": status, "reason": reason, "submitted": submitted,
+            "metadata": metadata, "source": source}
+
+
+def classify_evidence(evidence, *, score, strong_identity_match, supplied_identifier,
+                      lookup_issue="", doi_invalid=False, trusted_article_id=False):
+    state = lambda name: evidence[name]["status"]
+    conflicts = [name for name, value in evidence.items() if value["status"] == "conflicting"]
+    publication = [name for name in conflicts if name in {"year", "journal", "volume", "issue", "pages"}]
+    record_found = bool(evidence["title"]["metadata"])
+    anchored = strong_identity_match or (supplied_identifier and record_found)
+
+    if anchored and state("authors") == state("title") == "conflicting":
+        return "❌ possible falsification", "identifier record conflicts with both the submitted author list and title", score
+    if anchored and len(publication) >= 3:
+        return "❌ possible falsification", "major metadata conflict: " + ", ".join(publication), score
+    if anchored and len(publication) >= 2:
+        return "⚠ Suspicious", "multiple metadata conflicts: " + ", ".join(publication), score
+    # Substantive contradictions stay visible even when another field is unknown.
+    identity_conflicts = [name for name in conflicts if name in {"authors", "title", "journal", "year"}]
+    if "identifier" in conflicts:
+        return "⚠ Suspicious", "supplied identifiers refer to different records", score
+    if record_found and identity_conflicts:
+        return "⚠ Suspicious", ", ".join(
+            ("author list conflicts" if name == "authors" else name + " mismatch")
+            for name in identity_conflicts
+        ), score
+
+    material_unknown = [name for name in ("authors", "title", "year", "journal")
+                        if state(name) == "unknown"]
+    if "identifier" in evidence and state("identifier") == "unknown":
+        material_unknown.append("identifier")
+    # Omitted journal is supported on an identified DOI/PMID/PMC record, but
+    # an unverified supplied journal must still be reviewed.
+    if ((supplied_identifier or trusted_article_id) and state("title") == "matched"
+            and not evidence["journal"]["submitted"]):
+        material_unknown = [name for name in material_unknown if name != "journal"]
+    if material_unknown or doi_invalid:
+        reasons = [lookup_issue] if lookup_issue else []
+        if doi_invalid:
+            reasons.append("supplied DOI was not found; source identity requires review")
+        reasons.extend(name + ": " + evidence[name]["reason"] for name in material_unknown)
+        return UNVERIFIED_LABEL, "; ".join(reasons), score
+
+    notes = [name + " differs; check citation details" for name in publication]
+    if lookup_issue:
+        notes.append(lookup_issue)
+    return "✅ Real", "; ".join(notes), score
+
+
 def score_result(
     year_ok, author_ok, journal_ok, *,
     doi_explicit_ok=False, doi_derived_ok=False,
@@ -1164,6 +1348,7 @@ def score_result(
     doi_invalid=False, manual_review_web=False,
     metadata_conflicts=None, strong_identity_match=False,
     author_conflict=False, trusted_article_id=False,
+    field_evidence=None, supplied_identifier=False, lookup_issue="",
 ):
     weighted_score = compute_weighted_score(
         doi_explicit_ok=doi_explicit_ok, doi_derived_ok=doi_derived_ok,
@@ -1173,6 +1358,13 @@ def score_result(
 
     if manual_review_web:
         return MANUAL_REVIEW_LABEL, "organisational/report/dataset-style web source with URL", weighted_score
+
+    if field_evidence is not None:
+        return classify_evidence(
+            field_evidence, score=weighted_score, strong_identity_match=strong_identity_match,
+            supplied_identifier=supplied_identifier, lookup_issue=lookup_issue,
+            doi_invalid=doi_invalid, trusted_article_id=trusted_article_id,
+        )
 
     if doi_invalid:
         minimally_ok = any([year_ok, author_ok, title_ok, journal_ok, vol_ok, issue_ok, pages_ok]) or shape_ok
@@ -1332,13 +1524,15 @@ async def fetch_crossref_fielded(client, *, title, author_surname, container_tit
     }
     return await get_with_backoff(client, url, params=params, timeout=20)
 
-async def check_doi_org_head(client, doi_val: str) -> bool:
+async def check_doi_org_head(client, doi_val: str) -> bool | None:
     url = f"https://doi.org/{doi_val.rstrip('.,;:)')}"
     try:
         resp = await client.head(url, timeout=15, follow_redirects=False)
-        return resp.status_code in (200, 301, 302, 303, 307, 308)
+        if resp.status_code in (200, 301, 302, 303, 307, 308):
+            return True
+        return False if resp.status_code == 404 else None
     except Exception:
-        return False
+        return None
 
 # =========================
 # Strict Crossref chooser
@@ -1415,7 +1609,176 @@ def choose_best_crossref_item(
 # =========================
 # Validation
 # =========================
-async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool = False):
+ARXIV_ID_PATTERN = r"(?:\d{4}\.\d{4,5}|[a-z][a-z.\-]+/\d{7})(?:v[1-9]\d*)?"
+_ARXIV_GATE = threading.Lock()
+_ARXIV_LAST_REQUEST = 0.0
+_ARXIV_CACHE = {}
+
+
+def extract_arxiv_id(ref: str) -> str:
+    text = urllib.parse.unquote(html.unescape(ref or ""))
+    match = re.search(
+        r"(?:\barxiv\s*[:.]\s*|https?://(?:www\.|export\.)?arxiv\.org/(?:abs|pdf|html)/)"
+        r"(" + ARXIV_ID_PATTERN + r")(?![\w/])", text, re.I)
+    return match.group(1).lower() if match else ""
+
+
+def extract_ads_id(ref: str) -> str:
+    match = re.search(r"https?://(?:ui\.)?adsabs\.harvard\.edu/abs/([^\s?#]+)", ref or "", re.I)
+    if not match:
+        return ""
+    value = urllib.parse.unquote(match.group(1)).rstrip(".,;)")
+    for suffix in ("/abstract", "/references", "/citations", "/exportcitation"):
+        if value.endswith(suffix):
+            value = value[:-len(suffix)]
+    return value
+
+
+def arxiv_author_surname(name: str) -> str:
+    """Keep collective names; infer family names only from structured name text."""
+    name = " ".join(name.split())
+    if re.search(r"\b(collaboration|consortium|team|group)\b", name, re.I):
+        return name
+    if "," in name:
+        return name.split(",", 1)[0].strip()
+    words = name.split()
+    if not words:
+        return ""
+    start = len(words) - 1
+    while start > 0 and words[start - 1].lower() in {"de", "del", "di", "van", "von", "der", "den", "la", "le", "da", "dos"}:
+        start -= 1
+    return " ".join(words[start:])
+
+
+def parse_arxiv_feed(xml: str) -> list[dict]:
+    ns = {"a": "http://www.w3.org/2005/Atom"}
+    records = []
+    for entry in ET.fromstring(xml).findall("a:entry", ns):
+        identifier = extract_arxiv_id(entry.findtext("a:id", "", ns))
+        if not identifier:
+            continue  # API error entries are not bibliographic records.
+        names = [a.findtext("a:name", "", ns) for a in entry.findall("a:author", ns)]
+        dates = [entry.findtext("a:published", "", ns)[:4], entry.findtext("a:updated", "", ns)[:4]]
+        records.append({
+            "id": identifier, "source": "arXiv", "type": "preprint",
+            "title": " ".join(entry.findtext("a:title", "", ns).split()),
+            "authors": [arxiv_author_surname(name) for name in names], "author_names": names,
+            "years": list(dict.fromkeys(y for y in dates if y)), "journal": "arXiv",
+            "doi": "10.48550/arXiv." + re.sub(r"v\d+$", "", identifier),
+            "url": "https://arxiv.org/abs/" + identifier,
+        })
+    return records
+
+
+async def fetch_arxiv_records(client, *, identifier="", title="") -> tuple[list[dict], str]:
+    """Cache successful metadata for 24 hours; space API requests across sessions."""
+    global _ARXIV_LAST_REQUEST
+    key = identifier or title
+    cached = _ARXIV_CACHE.get(key)
+    if cached and time.monotonic() - cached[0] < 86400:
+        return cached[1], ""
+    while not _ARXIV_GATE.acquire(blocking=False):
+        await asyncio.sleep(0.1)
+    try:
+        cached = _ARXIV_CACHE.get(key)
+        if cached and time.monotonic() - cached[0] < 86400:
+            return cached[1], ""
+        await asyncio.sleep(max(0, 3.1 - (time.monotonic() - _ARXIV_LAST_REQUEST)))
+        _ARXIV_LAST_REQUEST = time.monotonic()
+        params = {"id_list": identifier} if identifier else {
+            "search_query": 'ti:"' + re.sub(r'["\\]', ' ', title) + '"', "max_results": 5}
+        response = await client.get("https://export.arxiv.org/api/query", params=params,
+                                    headers={"Accept": "application/atom+xml"}, timeout=25)
+        if response.status_code != 200:
+            return [], f"arXiv lookup unavailable: HTTP {response.status_code}"
+        records = parse_arxiv_feed(response.text)
+        if records:
+            if len(_ARXIV_CACHE) >= 256:
+                _ARXIV_CACHE.pop(next(iter(_ARXIV_CACHE)))
+            _ARXIV_CACHE[key] = (time.monotonic(), records)
+        return records, "" if records else "arXiv returned no matching record"
+    except Exception as exc:
+        return [], f"arXiv lookup unavailable: {type(exc).__name__}"
+    finally:
+        _ARXIV_GATE.release()
+
+
+async def fetch_arxiv_datacite(client, identifier: str) -> tuple[dict | None, str]:
+    # DataCite records describe the latest version only. Never substitute them
+    # for a version-specific arXiv request.
+    if re.search(r"v\d+$", identifier):
+        return None, "version-specific arXiv metadata unavailable"
+    doi = "10.48550/arXiv." + identifier
+    try:
+        response = await client.get("https://api.datacite.org/dois/" + doi, timeout=25)
+        if response.status_code != 200:
+            return None, f"DataCite lookup unavailable: HTTP {response.status_code}"
+        data = response.json().get("data", {}).get("attributes", {})
+        if str(data.get("doi", "")).casefold() != doi.casefold():
+            return None, "DataCite returned a different identifier"
+        names = data.get("creators", [])
+        return {
+            "id": identifier, "source": "DataCite (arXiv)", "type": "preprint",
+            "title": (data.get("titles") or [{}])[0].get("title", ""),
+            "authors": [a.get("familyName") or arxiv_author_surname(a.get("name", "")) for a in names],
+            "years": [str(data.get("publicationYear") or "")], "journal": "arXiv",
+            "doi": doi, "url": "https://arxiv.org/abs/" + identifier,
+        }, ""
+    except Exception as exc:
+        return None, f"DataCite lookup unavailable: {type(exc).__name__}"
+
+
+def select_physics_record(records, identifier, title, authors, uses_et_al):
+    if identifier:
+        for record in records:
+            candidate = record["id"]
+            if candidate == identifier or (not re.search(r"v\d+$", identifier)
+                    and re.sub(r"v\d+$", "", candidate) == identifier):
+                return record
+        return None
+    candidates = []
+    for record in records:
+        comparison = compare_author_lists(authors, record["authors"], uses_et_al=uses_et_al)
+        if title_similarity(title, record["title"]) >= 0.9 and comparison["ok"]:
+            candidates.append(record)
+    return candidates[0] if len(candidates) == 1 else None
+
+
+async def fetch_ads_record(client, *, token, identifier="", doi="", title="", authors=None,
+                           uses_et_al=False) -> tuple[dict | None, str]:
+    if not token:
+        return None, "NASA ADS is not configured (ADS_API_TOKEN required)"
+    def quoted(value):
+        return '"' + re.sub(r'([+\-!(){}\[\]^"~*?:\\/])', r'\\\1', value) + '"'
+    query = ("identifier:" + quoted(identifier) if identifier else "doi:" + quoted(doi) if doi else
+             "title:" + quoted(title) + (" AND author:" + quoted(authors[0]) if authors else ""))
+    try:
+        response = await client.get("https://api.adsabs.harvard.edu/v1/search/query",
+            params={"q": query, "fl": "bibcode,identifier,doi,title,author,year,pub,volume,issue,page,doctype", "rows": 5},
+            headers={"Authorization": "Bearer " + token, "Accept": "application/json"}, timeout=25)
+        if response.status_code != 200:
+            return None, f"NASA ADS lookup unavailable: HTTP {response.status_code}"
+        candidates = []
+        for doc in response.json().get("response", {}).get("docs", []):
+            identifiers = [str(x).casefold() for x in doc.get("identifier", []) + doc.get("doi", []) + [doc.get("bibcode", "")]]
+            if (identifier or doi) and (identifier or doi).casefold() not in identifiers:
+                continue
+            record = {"id": doc.get("bibcode", ""), "source": "NASA ADS", "type": doc.get("doctype", "article"),
+                "title": (doc.get("title") or [""])[0],
+                "authors": [arxiv_author_surname(name) for name in doc.get("author", [])],
+                "years": [str(doc.get("year", ""))], "journal": doc.get("pub", ""),
+                "doi": doi or (doc.get("doi") or [""])[0], "dois": doc.get("doi", []), "volume": str(doc.get("volume", "")),
+                "issue": str(doc.get("issue", "")), "pages": "-".join(doc.get("page", [])),
+                "url": "https://ui.adsabs.harvard.edu/abs/" + doc.get("bibcode", "") + "/abstract"}
+            if identifier or doi or select_physics_record([record], "", title, authors or [], uses_et_al):
+                candidates.append(record)
+        return (candidates[0], "") if len(candidates) == 1 else (None, "NASA ADS returned no unique matching record")
+    except Exception as exc:
+        # Exception messages may include request headers; report only the type.
+        return None, f"NASA ADS lookup unavailable: {type(exc).__name__}"
+
+
+async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool = False, *, ads_token=None):
     is_review = False
     review_source = ""
     review_notes = ""
@@ -1431,6 +1794,12 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
     year_value, _ = parse_year_token(year)
     ref_journal = extract_journal(ref_clean).lower()
     title = extract_title(ref_clean)
+    arxiv_id = extract_arxiv_id(ref)
+    ads_id = extract_ads_id(ref)
+    arxiv_reference = bool(arxiv_id or re.search(r"\barxiv\b", ref_journal, re.I))
+    physics_route = bool(arxiv_reference or ads_id)
+    physics_record = None
+    ads_token = ads_token if ads_token is not None else os.environ.get("ADS_API_TOKEN", "")
     doi_val = extract_doi(ref)
     pmid_val = extract_pmid(ref)
     pmcid_val = extract_pmcid(ref)
@@ -1458,6 +1827,9 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
     title_match_method = "no metadata title"
 
     metadata_authors = []
+    metadata_authors_issue = ""
+    lookup_issue = ""
+    author_parse_issue = author_extraction_issue(ref_clean, submitted_authors)
     author_comparison = compare_author_lists(
         submitted_authors,
         metadata_authors,
@@ -1484,6 +1856,8 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
 
     scholarly_like = looks_scholarly_like(ref_clean)
 
+    if physics_route:
+        manual_review_web = False
     if manual_review_web:
         return {
             "Reference": ref,
@@ -1523,7 +1897,7 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
             "Review Notes": "",
         }
 
-    if not (doi_val or pmid_val or pmcid_val) and primary_domain and not scholarly_like:
+    if not physics_route and not (doi_val or pmid_val or pmcid_val) and primary_domain and not scholarly_like:
         label = "📄 Web Source (trusted)" if trusted_web else "📄 Web Source"
         return {
             "Reference": ref,
@@ -1565,7 +1939,17 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
 
 
     try:
-        if doi_val:
+        if arxiv_reference:
+            records, lookup_issue = await fetch_arxiv_records(client, identifier=arxiv_id, title=title)
+            physics_record = select_physics_record(records, arxiv_id, title, submitted_authors, submitted_uses_et_al)
+            if not physics_record and arxiv_id:
+                physics_record, fallback_issue = await fetch_arxiv_datacite(client, arxiv_id)
+                lookup_issue = "" if physics_record else "; ".join(filter(None, [lookup_issue, fallback_issue]))
+            if not physics_record and not lookup_issue:
+                lookup_issue = "arXiv returned no unique matching record"
+        elif ads_id:
+            physics_record, lookup_issue = await fetch_ads_record(client, token=ads_token, identifier=ads_id)
+        elif doi_val:
             resp = await fetch_crossref_doi(client, doi_val)
             doi_org_ok = await check_doi_org_head(client, doi_val)
 
@@ -1582,6 +1966,7 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
                 )
                 crossref_year = str(cr_year or "")
                 metadata_authors = metadata_author_surnames(item.get("author", []))
+                metadata_authors_issue = metadata_author_issue(item.get("author", []))
                 it_title = (item.get("title") or [""])[0]
                 metadata_title = it_title
 
@@ -1620,7 +2005,7 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
             else:
                 doi_explicit_ok = resolved_identifier
             doi_invalid = bool(
-                doi_source != "heuristic" and (not doi_ok) and (not doi_org_ok)
+                doi_source != "heuristic" and resp.status_code == 404 and doi_org_ok is False
             )
 
             if item:
@@ -1669,6 +2054,7 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
                 year_ok = bool(year_value is not None and m_year and year_value == int(m_year.group(1)))
 
                 metadata_authors = metadata_author_surnames(summary.get("authors", []))
+                metadata_authors_issue = metadata_author_issue(summary.get("authors", []))
                 author_comparison = compare_author_lists(
                     submitted_authors,
                     metadata_authors,
@@ -1712,6 +2098,7 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
                 year_ok = bool(year_value is not None and m_year and year_value == int(m_year.group(1)))
 
                 metadata_authors = metadata_author_surnames(summary.get("authors") or [])
+                metadata_authors_issue = metadata_author_issue(summary.get("authors") or [])
                 author_comparison = compare_author_lists(
                     submitted_authors,
                     metadata_authors,
@@ -1776,6 +2163,7 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
                         iss = item.get("issued", {}).get("date-parts", [[None]])[0][0]
                         crossref_year = str(iss or "")
                         metadata_authors = metadata_author_surnames(item.get("author", []))
+                        metadata_authors_issue = metadata_author_issue(item.get("author", []))
                         it_title = (item.get("title") or [""])[0]
                         metadata_title = it_title
 
@@ -1854,6 +2242,7 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
                             iss = item.get("issued", {}).get("date-parts", [[None]])[0][0]
                             crossref_year = str(iss or "")
                             metadata_authors = metadata_author_surnames(item.get("author", []))
+                            metadata_authors_issue = metadata_author_issue(item.get("author", []))
                             it_title = (item.get("title") or [""])[0]
                             metadata_title = it_title
 
@@ -1900,57 +2289,83 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
                             match_reason = "fielded search: no acceptable Crossref match"
 
     except Exception as e:
-        base_result = "📄 Web Source" if primary_domain else "❌ Error"
-        return {
-            "Reference": ref,
-            "Validator Version": VALIDATOR_VERSION,
-            "Validator SHA256": VALIDATOR_SHA256,
-            "Extracted DOI": doi_val or "",
-            "DOI Source": doi_source or "",
-            "Crossref DOI": crossref_doi,
-            "Crossref Journal": crossref_journal,
-            "Crossref Year": crossref_year,
-            "PubMed ID": pubmed_id,
-            "PubMed Journal": pubmed_journal,
-            "PubMed Year": pubmed_year,
-            "Score": 0,
-            "Source URL": source_url,
-            "doi_ok": doi_ok,
-            "year_ok": year_ok,
-            "author_ok": author_ok,
-            **author_comparison_fields(
-                submitted_authors,
-                metadata_authors,
-                uses_et_al=submitted_uses_et_al,
-                comparison=author_comparison,
-            ),
-            "journal_ok": journal_ok,
-            "Validation Result": base_result,
-            "Raw Result": base_result,
-            "Notes": f"lookup error: {e}",
-            "AI URL flag": ai_url_flag,
-            "AL notes": ai_url_notes,
-            "Domain": primary_domain,
-            "Domains": domains_joined,
-            "doi_explicit_ok": doi_explicit_ok,
-            "doi_derived_ok": doi_derived_ok,
-        }
+        # Keep any established comparisons; an optional lookup failure must not
+        # erase a substantive contradiction or turn a journal article into Web.
+        lookup_issue = f"lookup unavailable: {type(e).__name__}"
 
-    metadata_year_value, _ = parse_year_token(crossref_year or pubmed_year)
-    metadata_journal = crossref_journal or pubmed_journal
-    author_conflict = bool(
-        submitted_authors and metadata_authors and not author_comparison["ok"]
-    )
-    metadata_conflicts = collect_confirmed_metadata_conflicts(
-        {
-            "authors": (bool(submitted_authors), bool(metadata_authors), author_ok),
-            "year": (year_value is not None, metadata_year_value is not None, year_ok),
-            "journal": (bool(ref_journal), bool(metadata_journal), journal_ok),
-            "volume": (bool(ref_vol), bool(cr_vol), vol_ok),
-            "issue": (bool(ref_issue), bool(cr_issue), issue_ok),
-            "pages": (bool(ref_pages or ref_pstart or ref_pend), bool(cr_pages), pages_ok),
-        }
-    )
+    # ADS is an additional discovery source after an unsuccessful existing
+    # lookup. A retrieved contradictory record is never replaced by a search hit.
+    if not physics_route and not metadata_title and ads_token and title and not (pmid_val or pmcid_val):
+        physics_record, ads_issue = await fetch_ads_record(client, token=ads_token,
+            doi=doi_val, title=title, authors=submitted_authors, uses_et_al=submitted_uses_et_al)
+        if physics_record:
+            lookup_issue = ""
+        elif ads_issue:
+            lookup_issue = "; ".join(filter(None, [lookup_issue, ads_issue]))
+
+    if physics_record:
+        if doi_val and doi_val.casefold() in [value.casefold() for value in physics_record.get("dois", [])]:
+            physics_record = dict(physics_record, doi=doi_val)
+        metadata_title = physics_record["title"]
+        metadata_authors = physics_record["authors"]
+        author_comparison = compare_author_lists(submitted_authors, metadata_authors, uses_et_al=submitted_uses_et_al)
+        author_ok = author_comparison["ok"]
+        title_ok, title_similarity_score, title_match_method, title_match_confidence = evaluate_title_match(
+            title, metadata_title, ref_clean)
+        year_ok = str(year_value) in physics_record["years"]
+        journal_ok = journals_match(ref_journal, physics_record["journal"])
+        cr_vol, cr_issue, cr_pages = (physics_record.get(key, "") for key in ("volume", "issue", "pages"))
+        vol_ok = bool(ref_vol and cr_vol and ref_vol == cr_vol)
+        issue_ok = bool(ref_issue and cr_issue and ref_issue == cr_issue)
+        pages_ok = pages_match(ref_pstart, ref_pend, cr_pages)
+        doi_invalid = False
+        if doi_val and doi_val.casefold() == physics_record.get("doi", "").casefold():
+            doi_ok = True
+            doi_source = "explicit"
+            try:
+                doi_explicit_ok = bool(await check_doi_org_head(client, doi_val))
+            except Exception:
+                doi_explicit_ok = False
+
+    if not physics_record and not lookup_issue and 'resp' in locals() and resp.status_code not in (200, 404):
+        lookup_issue = f"lookup unavailable: HTTP {resp.status_code}"
+    if not metadata_title and not lookup_issue:
+        lookup_issue = "lookup completed without a usable matching record"
+
+    metadata_year = ", ".join(physics_record["years"]) if physics_record else crossref_year or pubmed_year
+    metadata_year_value, _ = parse_year_token(metadata_year)
+    metadata_journal = physics_record["journal"] if physics_record else crossref_journal or pubmed_journal
+    metadata_source = ("Crossref " + crossref_doi if crossref_doi else
+                       "PubMed/PMC " + pubmed_id if pubmed_id else "bibliographic lookup")
+    if physics_record:
+        metadata_source = physics_record["source"] + " " + physics_record["id"]
+    field_evidence = {
+        "authors": comparison_evidence(submitted_authors, metadata_authors, author_ok,
+            issue=author_parse_issue or metadata_authors_issue, source=metadata_source),
+        "title": comparison_evidence(title, metadata_title, title_ok, source=metadata_source),
+        "year": comparison_evidence(year_value, metadata_year_value, year_ok, source=metadata_source),
+        "journal": comparison_evidence(ref_journal, metadata_journal, journal_ok,
+            issue=journal_comparison_issue(ref_journal, metadata_journal, journal_ok), source=metadata_source),
+        "volume": comparison_evidence(ref_vol, cr_vol, vol_ok, source=metadata_source),
+        "issue": comparison_evidence(ref_issue, cr_issue, issue_ok, source=metadata_source),
+        "pages": comparison_evidence(ref_pages, cr_pages, pages_ok, source=metadata_source),
+    }
+    if physics_record:
+        field_evidence["year"]["metadata"] = metadata_year
+        if arxiv_id or ads_id:
+            field_evidence["identifier"] = comparison_evidence(arxiv_id or ads_id, physics_record["id"], True, source=metadata_source)
+        if doi_val:
+            record_doi = physics_record.get("doi", "")
+            different_arxiv = bool(extract_arxiv_id(doi_val) and extract_arxiv_id(doi_val) != re.sub(r"v\d+$", "", physics_record["id"]))
+            field_evidence["identifier"] = comparison_evidence(doi_val, record_doi,
+                doi_val.casefold() == record_doi.casefold(),
+                issue="" if different_arxiv or doi_val.casefold() == record_doi.casefold() else "supplied DOI is not verified by this record",
+                source=metadata_source)
+    if field_evidence["authors"]["status"] == "unknown":
+        author_ok = False
+    author_conflict = field_evidence["authors"]["status"] == "conflicting"
+    metadata_conflicts = [name for name, value in field_evidence.items()
+                          if name != "title" and value["status"] == "conflicting"]
     strong_identity_match = bool(
         author_ok and metadata_title and title_ok and title_match_confidence >= 0.90
     )
@@ -1972,14 +2387,17 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
         metadata_conflicts=metadata_conflicts,
         strong_identity_match=strong_identity_match,
         author_conflict=author_conflict,
-        trusted_article_id=bool(pmid_val or pmcid_val),
+        trusted_article_id=bool(pmid_val or pmcid_val or physics_record),
+        field_evidence=field_evidence,
+        supplied_identifier=bool((doi_val and doi_source != "heuristic") or pmid_val or pmcid_val or arxiv_id or ads_id),
+        lookup_issue=lookup_issue,
     )
 
     if doi_invalid:
-        reason = (reason + ("; " if reason else "") + "DOI present but invalid (no Crossref and no doi.org resolution)").strip("; ")
+        reason = (reason + ("; " if reason else "") + "DOI not found by Crossref or the resolver").strip("; ")
 
     if doi_val and not doi_explicit_ok and not doi_derived_ok and not doi_invalid:
-        reason = (reason + ("; " if reason else "") + "DOI present but doi.org did not resolve/redirect").strip("; ")
+        reason = (reason + ("; " if reason else "") + "DOI resolver confirmation unavailable").strip("; ")
 
     if doi_derived_ok:
         reason = (
@@ -1988,7 +2406,7 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
             + "derived DOI used for metadata only; no DOI points awarded"
         ).strip("; ")
 
-    if doi_explicit_ok and result != "✅ Real":
+    if doi_explicit_ok and result in {"⚠ Suspicious", "❌ possible falsification"}:
         reason = (reason + ("; " if reason else "") +
                   "DOI resolves but metadata (author/title/journal/year/vol/issue/pages) mismatches").strip("; ")
 
@@ -1998,7 +2416,7 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
     if (not doi_val and not pmid_val) and primary_domain and looks_scholarly_like(ref_clean):
         if result in {"⚠ Suspicious", "❌ possible falsification"}:
             reason = (reason + ("; " if reason else "") +
-                      "journal-like reference with URL; attempted Crossref query but no acceptable match").strip("; ")
+                      "journal-like reference requires review; see comparison evidence").strip("; ")
 
     if (not doi_val and not pmid_val and not primary_domain) and result in {"⚠ Suspicious", "❌ possible falsification"}:
         reason = (reason + ("; " if reason else "") + "no DOI/PMID/URL present; manual review recommended").strip("; ")
@@ -2009,10 +2427,21 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
     if ai_url_flag:
         reason = (reason + ("; " if reason else "") + AI_URL_NOTE).strip("; ")
 
+    if physics_record:
+        reason = (reason + "; " if reason else "") + "Checked against " + metadata_source
+
     return {
         "Reference": ref,
             "Validator Version": VALIDATOR_VERSION,
             "Validator SHA256": VALIDATOR_SHA256,
+        "Metadata Source": physics_record["source"] if physics_record else ("Crossref" if crossref_doi else "PubMed/PMC" if pubmed_id else ""),
+        "Metadata Record URL": physics_record["url"] if physics_record else "",
+        "Metadata DOI": physics_record.get("doi", "") if physics_record else crossref_doi,
+        "Metadata Year": metadata_year,
+        "Metadata Journal": metadata_journal,
+        "Source Type": physics_record.get("type", "") if physics_record else "",
+        "arXiv ID": arxiv_id,
+        "ADS ID": ads_id,
         "Extracted DOI": (doi_val or ""),
         "DOI Source": doi_source or "",
         "Crossref DOI": (crossref_doi or "").rstrip(".,;:)"),
@@ -2060,6 +2489,11 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
         "vol_ok": vol_ok,
         "issue_ok": issue_ok,
         "pages_ok": pages_ok,
+        "Comparison evidence": field_evidence,
+        "Author extraction issue": author_parse_issue,
+        "Metadata author issue": metadata_authors_issue,
+        "Lookup issue": lookup_issue,
+        "Review required": result != "✅ Real",
         "metadata_conflict_count": len(metadata_conflicts),
         "metadata_conflicts": ", ".join(metadata_conflicts),
         "Is Review": bool(is_review) if check_reviews else False,
