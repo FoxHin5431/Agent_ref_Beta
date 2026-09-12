@@ -552,7 +552,8 @@ st.caption(
 
 physics_examples = Path(__file__).resolve().parent / "examples" / "physics"
 if (physics_examples / "arxiv-20.txt").is_file():
-    with st.expander("Physics Beta test pack"):
+    with st.sidebar:
+        st.markdown("**Physics Beta test**")
         st.write("20 real arXiv physics references, including DOI, PDF, identifier and older-format examples. "
                  "These checks verify the cited record; suitability and later publication are not assessed.")
         example_text = (physics_examples / "arxiv-20.txt").read_text(encoding="utf-8")
