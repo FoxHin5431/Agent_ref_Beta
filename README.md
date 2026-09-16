@@ -109,23 +109,6 @@ Current development priorities include:
 
 The longer-term aim is to make the verification layer as citation-style agnostic as possible: different reference formats should be normalised first, then checked using the same evidence-based validation process.
 
-## Open development
-
-I am developing Agent Ref openly so that the checking logic can be inspected, tested and improved.
-
-Issues, bug reports, edge cases and suggestions are welcome, particularly examples of reference formats that fail to parse or cases where the validator reaches the wrong conclusion.
-
-The project has been developed with extensive use of AI-assisted coding, Open AI, but the validation rules were developed independently of AI. 
-
-
-
--
-
-## Reference debugging
-
-The interface includes a **Reference debugging tool** link to the hosted Regex Inspector for examining extracted fields and validation comparisons.
-
-
 ## Deployment
 
 Current beta deployment:
