@@ -526,7 +526,7 @@ if page_choice != "Check references":
         """
         <div style="margin-top:3rem;padding-top:1rem;border-top:1px solid #C9DDD9;color:#536B70;font-size:.86rem">
           Agent Ref beta · Created by Mark Hintze ·
-          <a href="mailto:FoxHin5431@users.noreply.github.com">FoxHin5431@users.noreply.github.com</a>
+          <a href="https://github.com/FoxHin5431/Agent_ref_Beta">Source code</a>
         </div>
         """,
         unsafe_allow_html=True,
@@ -1265,7 +1265,7 @@ st.markdown(
     """
     <div style="margin-top:3rem;padding-top:1rem;border-top:1px solid #C9DDD9;color:#536B70;font-size:.86rem">
       Agent Ref beta · Created by Mark Hintze ·
-      <a href="mailto:FoxHin5431@users.noreply.github.com">FoxHin5431@users.noreply.github.com</a>
+      <a href="https://github.com/FoxHin5431/Agent_ref_Beta">Source code</a>
     </div>
     """,
     unsafe_allow_html=True,
