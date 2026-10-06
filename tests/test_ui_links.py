@@ -8,6 +8,13 @@ APP_PATH = Path(__file__).resolve().parents[1] / "app.py"
 
 
 class UiLinkTests(unittest.TestCase):
+    def test_beta_does_not_record_reference_checks(self) -> None:
+        source = APP_PATH.read_text(encoding="utf-8")
+
+        self.assertNotIn("save_check", source)
+        self.assertNotIn("DB_URL", source)
+        self.assertIn("Beta checks are for testing and are not recorded in Neon.", source)
+
     def test_regex_inspector_link_is_present(self) -> None:
         source = APP_PATH.read_text(encoding="utf-8")
 

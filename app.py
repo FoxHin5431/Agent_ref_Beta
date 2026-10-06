@@ -12,15 +12,12 @@ from datetime import date
 from difflib import SequenceMatcher
 import unicodedata
 import uuid
-from datetime import datetime, timezone
 from pathlib import Path
 import xml.etree.ElementTree as ET
-#import psycopg2
-#from psycopg2.extras import Json
 
 from agent_ref_validator.core import *  # Shared validator public API
 from agent_ref_validator.exports import build_excel_workbook, compute_doi_score
-from agent_ref_validator.run_records import MODULES, S390_CHOICES, module_details, save_check
+from agent_ref_validator.run_records import MODULES, S390_CHOICES, module_details
 
 # =========================
 # Streamlit UI
@@ -614,52 +611,9 @@ if user_input.strip():
     if warns:
         st.warning("Reference formatting may be inconsistent:\n\n- " + "\n- ".join(warns))
 
-st.caption("The selected module, submitted references, findings and result summary are recorded for review.")
+st.caption("Beta checks are for testing and are not recorded in Neon.")
 if selected_module is None:
     st.info("Choose a module before checking references. S390 and Other need one more detail.")
-
-def _utc_now():
-    return datetime.now(timezone.utc)
-
-def _log_run(*, input_text: str, split_refs: list[str], result_counts: dict, error_text: str | None):
-    possible_secret_files = (
-        Path.home() / ".streamlit" / "secrets.toml",
-        Path.cwd() / ".streamlit" / "secrets.toml",
-    )
-    if not any(path.is_file() for path in possible_secret_files):
-        return
-    try:
-        if not st.secrets.get("LOGGING_ENABLED", False):
-            return
-        db_url = st.secrets.get("DB_URL", "")
-        if not db_url:
-            return
-    except FileNotFoundError:
-        return
-    except Exception:
-        return
-
-    # conn = psycopg2.connect(db_url)
-    # try:
-    #     with conn, conn.cursor() as cur:
-    #         cur.execute(
-    #             """
-    #             insert into agent_ref_runs
-    #             (ts_utc, session_id, input_text, split_refs, result_counts, error_text)
-    #             values (%s, %s, %s, %s, %s, %s)
-    #             """,
-    #             (
-    #                 _utc_now(),
-    #                 st.session_state["sid"],
-    #                 input_text,
-    #                 Json(split_refs),
-    #                 Json(result_counts),
-    #                 error_text,
-    #             ),
-    #         )
-    # finally:
-    #     conn.close()
-    return
 
 # =========================
 # Display helpers
@@ -899,8 +853,6 @@ def _result_tone(label: str) -> str:
 if run_clicked and selected_module is not None:
     refs: list[str] = []
     results: list[dict] = []
-    result_counts: dict = {}
-    error_text: str | None = None
 
     try:
         refs = ready_refs or split_references(user_input)
@@ -936,31 +888,13 @@ if run_clicked and selected_module is not None:
             st.session_state["results_detect_reviews"] = check_reviews
             st.session_state["results_module"] = selected_module
 
-            df_for_log = pd.DataFrame(results)
-            result_counts = df_for_log["Validation Result"].value_counts().to_dict()
-
     except Exception as exc:
-        error_text = str(exc)
         st.error(
             "Agent Ref could not finish this check. Your references are still "
             "in the input box, so you can try again."
         )
         if debug_mode:
             st.exception(exc)
-
-    finally:
-        try:
-            db_url = st.secrets.get("DB_URL", "") or os.environ.get("DB_URL", "") or os.environ.get("DATABASE_URL", "")
-            if not db_url:
-                st.warning("This check could not be recorded: the Neon database is not configured.")
-            else:
-                save_check(db_url, app_name="Agent_ref_Beta", module=selected_module,
-                           input_text=user_input, split_refs=refs, findings=results,
-                           validator_version=VALIDATOR_VERSION, check_reviews=check_reviews,
-                           error_text=error_text)
-        except Exception:
-            st.warning("This check could not be recorded in Neon. The results are still available below.")
-
 
 stored_results = st.session_state.get("validation_results", [])
 if stored_results:

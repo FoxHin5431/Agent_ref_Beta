@@ -9,6 +9,8 @@ The aim is not to decide whether a student has committed academic misconduct. Ag
 **Try the current beta:**  
 https://agent-ref-beta.streamlit.app/
 
+Beta reference checks are for testing. The app does not record submitted references or findings in Neon.
+
 > Agent Ref is an independent beta project developed by Mark Hintze, Lecturer in Biology at The Open University. It is not an official Open University service.
 
 ## What it does
