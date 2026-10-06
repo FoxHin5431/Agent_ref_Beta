@@ -27,6 +27,9 @@ class PhysicsUITests(unittest.TestCase):
         self.assertFalse(app.exception)
         app.button(key="load_arxiv_examples").click().run()
         self.assertEqual(len(core.split_references(app.text_area(key="ref_input").value)), 20)
+        self.assertTrue(next(button for button in app.button if button.label == "Check references").disabled)
+        app.selectbox(key="module_choice").set_value("S390").run()
+        app.selectbox(key="s390_choice").set_value("SXH").run()
         with patch.object(core, "fetch_arxiv_records", AsyncMock(return_value=(records, ""))), \
              patch.object(core, "check_doi_org_head", AsyncMock(return_value=True)):
             next(button for button in app.button if button.label == "Check references").click().run()

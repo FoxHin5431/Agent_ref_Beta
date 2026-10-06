@@ -20,6 +20,7 @@ import xml.etree.ElementTree as ET
 
 from agent_ref_validator.core import *  # Shared validator public API
 from agent_ref_validator.exports import build_excel_workbook, compute_doi_score
+from agent_ref_validator.run_records import MODULES, S390_CHOICES, module_details, save_check
 
 # =========================
 # Streamlit UI
@@ -545,6 +546,11 @@ if "ref_input" not in st.session_state:
 st.markdown('<div id="check-references"></div>', unsafe_allow_html=True)
 st.markdown('<div class="ar-section-kicker">Reference check</div>', unsafe_allow_html=True)
 st.header("Paste your references")
+module_choice = st.selectbox("Module", [None, *MODULES], format_func=lambda value: value or "Select a module", key="module_choice")
+s390_choice = st.selectbox("S390 pathway", [None, *S390_CHOICES],
+                           format_func=lambda value: value or "Select a pathway", key="s390_choice") if module_choice == "S390" else None
+other_module = st.text_input("Other module", key="other_module") if module_choice == "Other" else ""
+selected_module = module_details(module_choice, s390_choice, other_module)
 st.caption(
     "Paste a reference list from Word, a PDF or another document. "
     "Line breaks inside a reference are treated as spaces when possible."
@@ -592,6 +598,7 @@ with action_col:
         "Check references",
         type="primary",
         use_container_width=True,
+        disabled=selected_module is None,
     )
 with clear_col:
     st.button("Clear", on_click=clear_ref_input, use_container_width=True)
@@ -607,11 +614,9 @@ if user_input.strip():
     if warns:
         st.warning("Reference formatting may be inconsistent:\n\n- " + "\n- ".join(warns))
 
-st.caption(
-    "When you select Check references, Agent Ref records the submitted list, "
-    "the result summary and any errors to help improve this beta. "
-    "It does not collect personal user data."
-)
+st.caption("The selected module, submitted references, findings and result summary are recorded for review.")
+if selected_module is None:
+    st.info("Choose a module before checking references. S390 and Other need one more detail.")
 
 def _utc_now():
     return datetime.now(timezone.utc)
@@ -891,8 +896,9 @@ def _result_tone(label: str) -> str:
     return "review"
 
 
-if run_clicked:
+if run_clicked and selected_module is not None:
     refs: list[str] = []
+    results: list[dict] = []
     result_counts: dict = {}
     error_text: str | None = None
 
@@ -928,6 +934,7 @@ if run_clicked:
             st.session_state["validation_results"] = results
             st.session_state["last_checked_count"] = total
             st.session_state["results_detect_reviews"] = check_reviews
+            st.session_state["results_module"] = selected_module
 
             df_for_log = pd.DataFrame(results)
             result_counts = df_for_log["Validation Result"].value_counts().to_dict()
@@ -942,17 +949,25 @@ if run_clicked:
             st.exception(exc)
 
     finally:
-        _log_run(
-            input_text=user_input,
-            split_refs=refs,
-            result_counts=result_counts,
-            error_text=error_text,
-        )
+        try:
+            db_url = st.secrets.get("DB_URL", "") or os.environ.get("DB_URL", "") or os.environ.get("DATABASE_URL", "")
+            if not db_url:
+                st.warning("This check could not be recorded: the Neon database is not configured.")
+            else:
+                save_check(db_url, app_name="Agent_ref_Beta", module=selected_module,
+                           input_text=user_input, split_refs=refs, findings=results,
+                           validator_version=VALIDATOR_VERSION, check_reviews=check_reviews,
+                           error_text=error_text)
+        except Exception:
+            st.warning("This check could not be recorded in Neon. The results are still available below.")
 
 
 stored_results = st.session_state.get("validation_results", [])
 if stored_results:
     df = pd.DataFrame(stored_results)
+    recorded_module = st.session_state.get("results_module")
+    if recorded_module:
+        st.caption("Checked for " + (recorded_module["other_module"] if recorded_module["module"] == "Other" else recorded_module["module"] + (" · " + recorded_module["s390_choice"] if recorded_module["s390_choice"] else "")))
     counts = df["Validation Result"].value_counts()
 
     total_count = int(len(df))

@@ -28,6 +28,8 @@ else:
     app.run()
 if app.exception:
     raise AssertionError([item.message for item in app.exception])
+app.selectbox(key='module_choice').set_value('S390').run()
+app.selectbox(key='s390_choice').set_value('SXB').run()
 captions = [caption.value for caption in app.caption]
 assert any(core.VALIDATOR_VERSION in value for value in captions), captions
 

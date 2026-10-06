@@ -14,7 +14,7 @@ import os
 import threading
 import time
 
-VALIDATOR_VERSION = "2026.09.12.2-beta2"
+VALIDATOR_VERSION = "2026.10.06.3"
 # Normalize line endings so Windows and Linux identify the same source.
 VALIDATOR_SHA256 = hashlib.sha256(Path(__file__).read_text(encoding="utf-8").encode("utf-8")).hexdigest()
 
