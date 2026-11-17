@@ -14,7 +14,7 @@ import os
 import threading
 import time
 
-VALIDATOR_VERSION = "2026.10.06.3"
+VALIDATOR_VERSION = "2026.11.17.1"
 # Normalize line endings so Windows and Linux identify the same source.
 VALIDATOR_SHA256 = hashlib.sha256(Path(__file__).read_text(encoding="utf-8").encode("utf-8")).hexdigest()
 
@@ -47,8 +47,11 @@ ORG_SOURCE_HINTS = {
     "agency", "organisation", "organization", "office for", "nhs", "ukhsa"
 }
 
-MANUAL_REVIEW_LABEL = "🟡 Manual review – web source / report / dataset"
-UNVERIFIED_LABEL = "🟡 Unable to verify — review required"
+SUFFICIENT_MATCH_LABEL = "✅ Sufficient match"
+CITATION_DETAILS_LABEL = "🟠 Citation details need checking"
+MAJOR_MISMATCH_LABEL = "🔴 Major mismatch"
+UNVERIFIED_LABEL = "🟡 Could not verify"
+MANUAL_REVIEW_LABEL = "🟡 Manual review — web source"
 
 AI_URL_NOTE = "AI tracking parameter detected: utm_source=chatgpt"
 
@@ -777,8 +780,8 @@ def compare_author_lists(
 ) -> dict:
     """Compare all explicitly supplied authors with trusted metadata.
 
-    Every explicitly supplied author must match; metadata coverage must be at
-    least 80%. With
+    Every explicitly supplied author must match. Omitted metadata authors are
+    reported separately from wrong or inserted names. With
     ``et al.``, each explicitly named author must match the corresponding
     leading metadata author, while omitted names are deliberately ignored.
     """
@@ -793,6 +796,10 @@ def compare_author_lists(
         "submitted_coverage": 0.0,
         "metadata_coverage": 0.0,
         "first_author_ok": False,
+        "omitted_count": 0,
+        "wrong_count": 0,
+        "incomplete": False,
+        "contradictory": False,
     }
     if not submitted:
         result["method"] = "no submitted authors extracted"
@@ -812,6 +819,8 @@ def compare_author_lists(
         result["matched_count"] = matched
         result["submitted_coverage"] = matched / len(submitted)
         result["metadata_coverage"] = matched / len(metadata)
+        result["wrong_count"] = len(submitted) - matched
+        result["contradictory"] = bool(result["wrong_count"])
         result["ok"] = bool(
             result["first_author_ok"]
             and matched == len(submitted)
@@ -837,11 +846,17 @@ def compare_author_lists(
 
     submitted_coverage = matched / len(submitted)
     metadata_coverage = matched / len(metadata)
+    omitted_count = len(metadata) - matched
+    wrong_count = len(submitted) - matched
     result.update(
         {
             "matched_count": matched,
             "submitted_coverage": submitted_coverage,
             "metadata_coverage": metadata_coverage,
+            "omitted_count": omitted_count,
+            "wrong_count": wrong_count,
+            "incomplete": omitted_count > 0 and wrong_count == 0,
+            "contradictory": wrong_count > 0 or not result["first_author_ok"],
         }
     )
 
@@ -853,9 +868,12 @@ def compare_author_lists(
     result["ok"] = bool(
         result["first_author_ok"]
         and submitted_coverage == 1.0
-        and metadata_coverage >= 0.8
     )
-    result["method"] = "full author list" if result["ok"] else "full-list mismatch"
+    result["method"] = (
+        "full author list" if result["ok"] and not result["incomplete"]
+        else "incomplete author list" if result["ok"]
+        else "named-author mismatch"
+    )
     return result
 
 
@@ -882,6 +900,10 @@ def author_comparison_fields(
         "Author submitted coverage": round(comparison["submitted_coverage"], 3),
         "Author metadata coverage": round(comparison["metadata_coverage"], 3),
         "First author matches": bool(comparison["first_author_ok"]),
+        "Omitted author count": int(comparison["omitted_count"]),
+        "Wrong author count": int(comparison["wrong_count"]),
+        "Author list incomplete": bool(comparison["incomplete"]),
+        "Author list contradictory": bool(comparison["contradictory"]),
     }
 
 def title_similarity(a: str, b: str) -> float:
@@ -1303,17 +1325,17 @@ def classify_evidence(evidence, *, score, strong_identity_match, supplied_identi
     anchored = strong_identity_match or (supplied_identifier and record_found)
 
     if anchored and state("authors") == state("title") == "conflicting":
-        return "❌ possible falsification", "identifier record conflicts with both the submitted author list and title", score
+        return MAJOR_MISMATCH_LABEL, "identifier record conflicts with both the submitted author list and title", score
     if anchored and len(publication) >= 3:
-        return "❌ possible falsification", "major metadata conflict: " + ", ".join(publication), score
+        return MAJOR_MISMATCH_LABEL, "major metadata conflict: " + ", ".join(publication), score
     if anchored and len(publication) >= 2:
-        return "⚠ Suspicious", "multiple metadata conflicts: " + ", ".join(publication), score
+        return CITATION_DETAILS_LABEL, "multiple metadata conflicts: " + ", ".join(publication), score
     # Substantive contradictions stay visible even when another field is unknown.
     identity_conflicts = [name for name in conflicts if name in {"authors", "title", "journal", "year"}]
     if "identifier" in conflicts:
-        return "⚠ Suspicious", "supplied identifiers refer to different records", score
+        return MAJOR_MISMATCH_LABEL, "supplied identifiers refer to different records", score
     if record_found and identity_conflicts:
-        return "⚠ Suspicious", ", ".join(
+        return CITATION_DETAILS_LABEL, ", ".join(
             ("author list conflicts" if name == "authors" else name + " mismatch")
             for name in identity_conflicts
         ), score
@@ -1337,7 +1359,7 @@ def classify_evidence(evidence, *, score, strong_identity_match, supplied_identi
     notes = [name + " differs; check citation details" for name in publication]
     if lookup_issue:
         notes.append(lookup_issue)
-    return "✅ Real", "; ".join(notes), score
+    return SUFFICIENT_MATCH_LABEL, "; ".join(notes), score
 
 
 def score_result(
@@ -1368,12 +1390,12 @@ def score_result(
 
     if doi_invalid:
         minimally_ok = any([year_ok, author_ok, title_ok, journal_ok, vol_ok, issue_ok, pages_ok]) or shape_ok
-        label = "⚠ Suspicious" if minimally_ok else "❌ possible falsification"
+        label = CITATION_DETAILS_LABEL if minimally_ok else MAJOR_MISMATCH_LABEL
         return label, "invalid DOI", weighted_score
 
     if doi_explicit_ok and author_conflict and (not title_ok):
         return (
-            "❌ possible falsification",
+            MAJOR_MISMATCH_LABEL,
             "DOI resolves but both the submitted author list and title mismatch "
             "(likely wrong DOI or fabricated pairing)",
             weighted_score
@@ -1381,7 +1403,7 @@ def score_result(
 
     if doi_explicit_ok and author_conflict:
         return (
-            "⚠ Suspicious",
+            CITATION_DETAILS_LABEL,
             "DOI resolves but the submitted author list conflicts with trusted metadata",
             weighted_score,
         )
@@ -1396,7 +1418,7 @@ def score_result(
     # in optional fields as stronger evidence than a verified identifier.
     if (not doi_explicit_ok) and strong_identity_match and len(conflicts) >= 3:
         return (
-            "❌ possible falsification",
+            MAJOR_MISMATCH_LABEL,
             "major metadata conflict: title and author identify the work, but "
             + ", ".join(conflicts)
             + " contradict the trusted record",
@@ -1405,7 +1427,7 @@ def score_result(
 
     if (not doi_explicit_ok) and strong_identity_match and len(conflicts) == 2:
         return (
-            "⚠ Suspicious",
+            CITATION_DETAILS_LABEL,
             "multiple metadata conflicts: title and author identify the work, but "
             + " and ".join(conflicts)
             + " contradict the trusted record",
@@ -1416,7 +1438,7 @@ def score_result(
         id_match = title_ok
         biblio_one = any([year_ok, journal_ok, vol_ok, issue_ok, pages_ok])
         if id_match and biblio_one:
-            return "✅ Real", "", weighted_score
+            return SUFFICIENT_MATCH_LABEL, "", weighted_score
 
     # A discovered DOI or PubMed/PMC identifier can populate the comparison
     # flags, but the reference must pass the ordinary metadata rule to be
@@ -1432,7 +1454,7 @@ def score_result(
         and author_ok
         and journal_or_missing_journal_title_ok
     ):
-        return "✅ Real", "", weighted_score
+        return SUFFICIENT_MATCH_LABEL, "", weighted_score
 
     reasons = []
     if not doi_explicit_ok: reasons.append("no DOI supplied")
@@ -1445,19 +1467,19 @@ def score_result(
     if not pages_ok: reasons.append("pages mismatch")
 
     if weighted_score >= 4:
-        return "⚠ Suspicious", ", ".join(reasons), weighted_score
+        return CITATION_DETAILS_LABEL, ", ".join(reasons), weighted_score
 
     title_len = len(extract_title(ref) or "")
     has_author_token = bool(extract_first_author(ref))
     if (not has_url) and (not had_crossref_candidate):
         if shape_ok and has_author_token and title_len >= 25:
-            return "⚠ Suspicious", ", ".join(reasons) or "unverifiable but well-formed", weighted_score
+            return CITATION_DETAILS_LABEL, ", ".join(reasons) or "unverifiable but well-formed", weighted_score
         else:
-            return "❌ possible falsification", ", ".join(reasons) or "failed most checks", weighted_score
+            return MAJOR_MISMATCH_LABEL, ", ".join(reasons) or "failed most checks", weighted_score
     else:
         if shape_ok and has_author_token and title_len >= 35:
-            return "⚠ Suspicious", ", ".join(reasons), weighted_score
-        return "❌ possible falsification", ", ".join(reasons) or "failed most checks", weighted_score
+            return CITATION_DETAILS_LABEL, ", ".join(reasons), weighted_score
+        return MAJOR_MISMATCH_LABEL, ", ".join(reasons) or "failed most checks", weighted_score
 
 # =========================
 # Async API Calls
@@ -2393,6 +2415,12 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
         lookup_issue=lookup_issue,
     )
 
+    if author_comparison["incomplete"] and not submitted_uses_et_al:
+        reason = (reason + "; " if reason else "") + (
+            f"author list incomplete: {author_comparison['omitted_count']} "
+            "metadata author(s) omitted"
+        )
+
     if doi_invalid:
         reason = (reason + ("; " if reason else "") + "DOI not found by Crossref or the resolver").strip("; ")
 
@@ -2406,7 +2434,7 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
             + "derived DOI used for metadata only; no DOI points awarded"
         ).strip("; ")
 
-    if doi_explicit_ok and result in {"⚠ Suspicious", "❌ possible falsification"}:
+    if doi_explicit_ok and result in {CITATION_DETAILS_LABEL, MAJOR_MISMATCH_LABEL}:
         reason = (reason + ("; " if reason else "") +
                   "DOI resolves but metadata (author/title/journal/year/vol/issue/pages) mismatches").strip("; ")
 
@@ -2414,11 +2442,11 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
         reason = (reason + ("; " if reason else "") + match_reason)
 
     if (not doi_val and not pmid_val) and primary_domain and looks_scholarly_like(ref_clean):
-        if result in {"⚠ Suspicious", "❌ possible falsification"}:
+        if result in {CITATION_DETAILS_LABEL, MAJOR_MISMATCH_LABEL}:
             reason = (reason + ("; " if reason else "") +
                       "journal-like reference requires review; see comparison evidence").strip("; ")
 
-    if (not doi_val and not pmid_val and not primary_domain) and result in {"⚠ Suspicious", "❌ possible falsification"}:
+    if (not doi_val and not pmid_val and not primary_domain) and result in {CITATION_DETAILS_LABEL, MAJOR_MISMATCH_LABEL}:
         reason = (reason + ("; " if reason else "") + "no DOI/PMID/URL present; manual review recommended").strip("; ")
 
     if trusted_web and primary_domain and ("Web Source" in result or "Manual review" in result):
@@ -2493,7 +2521,7 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
         "Author extraction issue": author_parse_issue,
         "Metadata author issue": metadata_authors_issue,
         "Lookup issue": lookup_issue,
-        "Review required": result != "✅ Real",
+        "Review required": result != SUFFICIENT_MATCH_LABEL,
         "metadata_conflict_count": len(metadata_conflicts),
         "metadata_conflicts": ", ".join(metadata_conflicts),
         "Is Review": bool(is_review) if check_reviews else False,

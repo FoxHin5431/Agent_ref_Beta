@@ -62,7 +62,7 @@ class PhysicsPipelineTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_preprint_passes_without_journal_publication_fields(self):
         result = await self.validate()
-        self.assertEqual(result["Validation Result"], "✅ Real", result["Notes"])
+        self.assertEqual(result["Validation Result"], "✅ Sufficient match", result["Notes"])
         self.assertEqual(result["Metadata Source"], "arXiv")
         self.assertEqual(result["Crossref DOI"], "")
         self.assertEqual(result["Comparison evidence"]["volume"]["status"], "unknown")
@@ -76,12 +76,12 @@ class PhysicsPipelineTests(unittest.IsolatedAsyncioTestCase):
     async def test_deliberate_conflicts_remain_visible(self):
         for old, new in [("Smith", "Inventedperson"), (RECORD["title"], "Orchard irrigation methods and apple harvesting"), ("(2024)", "(1990)")]:
             result = await self.validate(REFERENCE.replace(old, new))
-            self.assertEqual(result["Validation Result"], "⚠ Suspicious", result["Notes"])
+            self.assertEqual(result["Validation Result"], "🟠 Citation details need checking", result["Notes"])
 
     async def test_arxiv_doi_uses_correct_registration_source(self):
         result = await self.validate(REFERENCE.replace("https://arxiv.org/abs/2401.12345", "https://doi.org/10.48550/arXiv.2401.12345"))
         self.assertTrue(result["doi_explicit_ok"])
-        self.assertEqual(result["Validation Result"], "✅ Real")
+        self.assertEqual(result["Validation Result"], "✅ Sufficient match")
 
     async def test_resolver_failure_does_not_destroy_arxiv_record(self):
         with patch.object(core, "fetch_arxiv_records", AsyncMock(return_value=([RECORD], ""))), \
@@ -94,7 +94,7 @@ class PhysicsPipelineTests(unittest.IsolatedAsyncioTestCase):
     async def test_additional_unverified_or_conflicting_doi(self):
         for doi in ["10.48550/arXiv.2402.54321", "10.1234/unconfirmed"]:
             result = await self.validate(REFERENCE + " doi:" + doi)
-            self.assertNotEqual(result["Validation Result"], "✅ Real")
+            self.assertNotEqual(result["Validation Result"], "✅ Sufficient match")
 
     async def test_unavailable_sources_require_review(self):
         with patch.object(core, "fetch_arxiv_records", AsyncMock(return_value=([], "arXiv lookup unavailable: HTTP 503"))), \
@@ -105,7 +105,7 @@ class PhysicsPipelineTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_title_only_arxiv_search_requires_unique_identity(self):
         result = await self.validate(REFERENCE.replace("https://arxiv.org/abs/2401.12345", ""))
-        self.assertEqual(result["Validation Result"], "✅ Real", result["Notes"])
+        self.assertEqual(result["Validation Result"], "✅ Sufficient match", result["Notes"])
 
     async def test_ads_record_uses_same_evidence_pipeline(self):
         record = dict(RECORD, id="2024PhRvD.109a2345S", source="NASA ADS", type="article",
@@ -114,7 +114,7 @@ class PhysicsPipelineTests(unittest.IsolatedAsyncioTestCase):
             "Physical Review D. https://ui.adsabs.harvard.edu/abs/2024PhRvD.109a2345S/abstract")
         with patch.object(core, "fetch_ads_record", AsyncMock(return_value=(record, ""))) as lookup:
             result = await core.validate_single_ref(None, reference, ads_token="test-token")
-        self.assertEqual(result["Validation Result"], "✅ Real", result["Notes"])
+        self.assertEqual(result["Validation Result"], "✅ Sufficient match", result["Notes"])
         self.assertEqual(result["Metadata Source"], "NASA ADS")
         self.assertEqual(lookup.call_args.kwargs["token"], "test-token")
 
@@ -127,7 +127,7 @@ class PhysicsPipelineTests(unittest.IsolatedAsyncioTestCase):
              patch.object(core, "fetch_crossref_fielded", AsyncMock(return_value=response)), \
              patch.object(core, "fetch_ads_record", AsyncMock(return_value=(record, ""))):
             result = await core.validate_single_ref(None, reference, ads_token="test-token")
-        self.assertEqual(result["Validation Result"], "✅ Real", result["Notes"])
+        self.assertEqual(result["Validation Result"], "✅ Sufficient match", result["Notes"])
 
     async def test_arxiv_word_in_journal_article_title_does_not_reroute(self):
         reference = "Smith, A. (2024) ‘Studies of arXiv submissions’. Journal of Research. doi:10.1234/example"

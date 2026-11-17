@@ -156,7 +156,7 @@ class AcademicUrlRoutingTests(unittest.IsolatedAsyncioTestCase):
             result = await self.core.validate_single_ref(None, PUBMED_REFERENCE)
 
         self.assertEqual(result["PubMed ID"], "37356727")
-        self.assertEqual(result["Validation Result"], "✅ Real")
+        self.assertEqual(result["Validation Result"], "✅ Sufficient match")
         self.assertNotEqual(result["Validation Result"], self.core.MANUAL_REVIEW_LABEL)
 
     async def test_pmc_article_without_submitted_journal_uses_title_identity(self) -> None:
@@ -169,7 +169,7 @@ class AcademicUrlRoutingTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["PubMed ID"], "PMC6908414")
         self.assertTrue(result["title_ok"])
-        self.assertEqual(result["Validation Result"], "✅ Real")
+        self.assertEqual(result["Validation Result"], "✅ Sufficient match")
 
     async def test_pubmed_volume_issue_and_pages_are_compared(self) -> None:
         cases = {
@@ -225,7 +225,7 @@ class AcademicUrlRoutingTests(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(result["vol_ok"])
                     self.assertTrue(result["issue_ok"])
                     self.assertEqual(result["metadata_conflict_count"], 0)
-                    self.assertEqual(result["Validation Result"], "✅ Real")
+                    self.assertEqual(result["Validation Result"], "✅ Sufficient match")
 
 
 if __name__ == "__main__":

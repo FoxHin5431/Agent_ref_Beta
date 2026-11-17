@@ -118,7 +118,7 @@ class TitleBackValidationPipelineTests(unittest.IsolatedAsyncioTestCase):
         ):
             result = await core.validate_single_ref(None, R024_REFERENCE)
 
-        self.assertEqual(result["Validation Result"], "✅ Real")
+        self.assertEqual(result["Validation Result"], "✅ Sufficient match")
         self.assertTrue(result["title_ok"])
         self.assertLess(result["title_similarity"], 0.75)
         self.assertEqual(

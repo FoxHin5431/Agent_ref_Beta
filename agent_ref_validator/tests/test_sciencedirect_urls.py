@@ -74,12 +74,12 @@ class ScienceDirectUrlTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(result[field], baseline[field], field)
                     self.assertFalse(result["AI URL flag"])
             if "Gustafson" in reference:
-                self.assertEqual(baseline["Validation Result"], "✅ Real")
+                self.assertEqual(baseline["Validation Result"], "✅ Sufficient match")
 
     async def test_url_does_not_hide_a_conflicting_author(self):
         result = await self.validate(REFERENCE.replace("Gastafson", "Unrelated") + SUFFIXES[2])
         self.assertFalse(result["author_ok"])
-        self.assertNotEqual(result["Validation Result"], "✅ Real")
+        self.assertNotEqual(result["Validation Result"], "✅ Sufficient match")
 
 
 if __name__ == "__main__":

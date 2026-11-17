@@ -20,7 +20,7 @@ class RunRecordTests(unittest.TestCase):
         run_id = save_check(
             "postgresql://fixture", app_name="pilot",
             module=module_details("S390", "SXB"), input_text="Reference A",
-            split_refs=["Reference A"], findings=[{"Validation Result": "✅ Real", "Reference": "Reference A"}],
+            split_refs=["Reference A"], findings=[{"Validation Result": "✅ Sufficient match", "Reference": "Reference A"}],
             validator_version="test",
         )
         self.assertTrue(run_id)
@@ -30,8 +30,8 @@ class RunRecordTests(unittest.TestCase):
         self.assertEqual(values[2:4], ("S390", "SXB"))
         self.assertEqual(values[5], "Reference A")
         self.assertEqual(values[6].adapted, ["Reference A"])
-        self.assertEqual(values[7].adapted[0]["Validation Result"], "✅ Real")
-        self.assertEqual(values[8].adapted, {"✅ Real": 1})
+        self.assertEqual(values[7].adapted[0]["Validation Result"], "✅ Sufficient match")
+        self.assertEqual(values[8].adapted, {"✅ Sufficient match": 1})
 
 
 if __name__ == "__main__":

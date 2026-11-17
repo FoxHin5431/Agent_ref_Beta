@@ -1,7 +1,8 @@
 """Shared Excel export for Agent Ref interfaces."""
 import io
 import pandas as pd
-from .core import MANUAL_REVIEW_LABEL, UNVERIFIED_LABEL
+from .core import (CITATION_DETAILS_LABEL, MAJOR_MISMATCH_LABEL,
+                   MANUAL_REVIEW_LABEL, SUFFICIENT_MATCH_LABEL, UNVERIFIED_LABEL)
 
 def compute_doi_score(row: pd.Series) -> int:
     """
@@ -115,8 +116,8 @@ def build_excel_workbook(
 
     issues = export_df[
         export_df["Validation Result"].isin([
-            "⚠ Suspicious",
-            "❌ possible falsification",
+            CITATION_DETAILS_LABEL,
+            MAJOR_MISMATCH_LABEL,
             "❌ Error",
             MANUAL_REVIEW_LABEL,
             UNVERIFIED_LABEL
@@ -208,19 +209,19 @@ def build_excel_workbook(
                 first = 1
                 last = nrows
                 ws.conditional_format(first, col_idx, last, col_idx, {
-                    "type": "text", "criteria": "containing", "value": "Real", "format": fmt_real
+                    "type": "text", "criteria": "containing", "value": "Sufficient match", "format": fmt_real
                 })
                 ws.conditional_format(first, col_idx, last, col_idx, {
                     "type": "text", "criteria": "containing", "value": "Manual review", "format": fmt_manual
                 })
                 ws.conditional_format(first, col_idx, last, col_idx, {
-                    "type": "text", "criteria": "containing", "value": "Unable to verify", "format": fmt_manual
+                    "type": "text", "criteria": "containing", "value": "Could not verify", "format": fmt_manual
                 })
                 ws.conditional_format(first, col_idx, last, col_idx, {
                     "type": "text", "criteria": "containing", "value": "Web Source", "format": fmt_web
                 })
                 ws.conditional_format(first, col_idx, last, col_idx, {
-                    "type": "text", "criteria": "containing", "value": "Suspicious", "format": fmt_susp
+                    "type": "text", "criteria": "containing", "value": "Citation details need checking", "format": fmt_susp
                 })
                 ws.conditional_format(first, col_idx, last, col_idx, {
                     "type": "text", "criteria": "containing", "value": "AI", "format": fmt_ai

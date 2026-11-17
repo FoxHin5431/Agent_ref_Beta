@@ -148,7 +148,7 @@ class YearSuffixPipelineTests(unittest.IsolatedAsyncioTestCase):
                 ):
                     result = await core.validate_single_ref(None, reference)
 
-                self.assertEqual(result["Validation Result"], "✅ Real")
+                self.assertEqual(result["Validation Result"], "✅ Sufficient match")
                 self.assertEqual(result["Score"], expected_score)
                 self.assertTrue(result["year_ok"])
                 self.assertNotIn("lookup error", result["Notes"].lower())
@@ -170,7 +170,7 @@ class YearSuffixPipelineTests(unittest.IsolatedAsyncioTestCase):
                 ):
                     result = await core.validate_single_ref(None, double_quoted_reference)
 
-                self.assertEqual(result["Validation Result"], "✅ Real")
+                self.assertEqual(result["Validation Result"], "✅ Sufficient match")
                 self.assertEqual(result["Score"], expected_score)
                 self.assertTrue(result["title_ok"])
 

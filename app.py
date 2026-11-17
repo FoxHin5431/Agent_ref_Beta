@@ -31,21 +31,21 @@ st.set_page_config(
 )
 
 RESULTS_GUIDE_MD = """
-Agent Ref marks a reference **Real** only when it passes a verification rule.
+Agent Ref marks a reference **Sufficient match** when independent details support
+the same retrieved record.
 The score describes the strength of the evidence, but it does not decide the
 result by itself.
 
-- **Real:** A supplied DOI resolves and key details agree, or a DOI-free record
-  has a strong match across trusted bibliographic metadata.
-- **Manual review:** The source looks like a report, data set or organizational
+- **Sufficient match:** Enough independent details match a retrieved record.
+- **Manual review — web source:** The source looks like a report, data set or organizational
   webpage that cannot be judged like a journal article.
 - **Web source:** The item is a general webpage rather than a conventional
   academic publication.
-- **Unable to verify:** Parsing, lookup or metadata could not establish the source
+- **Could not verify:** Parsing, lookup or metadata could not establish the source
   reliably. These references remain in the review queue.
-- **Suspicious:** The retrieved record contains a meaningful contradiction.
-- **Possible falsification:** An identifier points to different authors and title,
-  or several publication details contradict an identified record.
+- **Citation details need checking:** A likely matching record has differing or incomplete details.
+- **Major mismatch:** The reference differs substantially from an identified record,
+  or its identifier points to a different work.
 
 Confirmed conflicts are considered before the score. Missing information is not
 treated as a contradiction.
@@ -55,12 +55,11 @@ AUTHORS_GUIDE_MD = """
 Agent Ref extracts every surname supplied by the student and compares it with
 Crossref, PubMed, PMC, arXiv or NASA ADS metadata.
 
-- Every supplied author must match, including the first author; the supplied
-  list must cover at least **80% of the metadata authors**.
+- Every named author must match, including the first author. Omitted authors
+  are reported separately from wrong or inserted names.
 - With **et al.**, every author named before *et al.* must match the corresponding
   author in the trusted record.
-- A resolved DOI with a conflicting author list is sent for review rather than
-  being marked Real automatically.
+- A resolved DOI with a wrong named author is sent for review.
 """
 
 TITLES_GUIDE_MD = """
@@ -841,11 +840,11 @@ def style_part_by_part(df: pd.DataFrame):
 
 def _result_tone(label: str) -> str:
     label_lower = (label or "").lower()
-    if "possible falsification" in label_lower or "error" in label_lower:
+    if "major mismatch" in label_lower or "error" in label_lower:
         return "danger"
-    if "suspicious" in label_lower or "manual review" in label_lower:
+    if "citation details need checking" in label_lower or "manual review" in label_lower:
         return "warning"
-    if "real" in label_lower:
+    if "sufficient match" in label_lower:
         return "real"
     return "review"
 
@@ -905,14 +904,14 @@ if stored_results:
     counts = df["Validation Result"].value_counts()
 
     total_count = int(len(df))
-    real_count = int(counts.get("✅ Real", 0))
+    real_count = int(counts.get(SUFFICIENT_MATCH_LABEL, 0))
     manual_count = int(counts.get(MANUAL_REVIEW_LABEL, 0)) + int(counts.get(UNVERIFIED_LABEL, 0))
     web_count = int(
         counts.get("📄 Web Source (trusted)", 0)
         + counts.get("📄 Web Source", 0)
     )
-    suspicious_count = int(counts.get("⚠ Suspicious", 0))
-    false_count = int(counts.get("❌ possible falsification", 0))
+    suspicious_count = int(counts.get(CITATION_DETAILS_LABEL, 0))
+    false_count = int(counts.get(MAJOR_MISMATCH_LABEL, 0))
     error_count = int(counts.get("❌ Error", 0))
 
     st.markdown('<div class="ar-section-kicker">Results</div>', unsafe_allow_html=True)
@@ -920,10 +919,10 @@ if stored_results:
 
     summary_items = [
         ("all", total_count, "References checked"),
-        ("real", real_count, "Real"),
+        ("real", real_count, "Sufficient match"),
         ("review", manual_count + web_count, "Review required or web"),
-        ("suspicious", suspicious_count, "Suspicious"),
-        ("danger", false_count + error_count, "Possible falsification or error"),
+        ("suspicious", suspicious_count, "Citation details need checking"),
+        ("danger", false_count + error_count, "Major mismatch or error"),
     ]
     if "result_filter" not in st.session_state:
         st.session_state["result_filter"] = "all"
@@ -986,12 +985,12 @@ if stored_results:
         if active_filter == "all":
             return True
         if active_filter == "real":
-            return "real" in label and "manual" not in label
+            return "sufficient match" in label
         if active_filter == "review":
-            return "manual review" in label or "web source" in label or "unable to verify" in label
+            return "manual review" in label or "web source" in label or "could not verify" in label
         if active_filter == "suspicious":
-            return "suspicious" in label
-        return "possible falsification" in label or "error" in label
+            return "citation details need checking" in label
+        return "major mismatch" in label or "error" in label
 
     filtered_indices = [
         index for index in range(len(df))

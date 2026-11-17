@@ -183,14 +183,27 @@ class FullAuthorComparisonTests(unittest.TestCase):
         self.assertEqual(accepted["method"], "et al. named-author prefix")
         self.assertFalse(rejected["ok"])
 
-    def test_omitted_authors_without_et_al_do_not_count_as_full_match(self) -> None:
+    def test_omitted_authors_without_et_al_are_incomplete_not_wrong(self) -> None:
         comparison = core.compare_author_lists(
             ["Stern"],
             ["Stern", "Piatkowska"],
         )
 
-        self.assertFalse(comparison["ok"])
+        self.assertTrue(comparison["ok"])
         self.assertTrue(comparison["first_author_ok"])
+        self.assertEqual(comparison["omitted_count"], 1)
+        self.assertEqual(comparison["wrong_count"], 0)
+        self.assertTrue(comparison["incomplete"])
+        self.assertFalse(comparison["contradictory"])
+
+    def test_inserted_author_is_a_contradiction(self) -> None:
+        comparison = core.compare_author_lists(
+            ["Stern", "Invented"],
+            ["Stern", "Piatkowska"],
+        )
+        self.assertFalse(comparison["ok"])
+        self.assertEqual(comparison["wrong_count"], 1)
+        self.assertTrue(comparison["contradictory"])
 
     def test_pubmed_names_are_converted_to_surnames(self) -> None:
         self.assertEqual(
@@ -234,7 +247,7 @@ class FullAuthorPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["Metadata Authors"], "Stern, Piatkowska")
         self.assertEqual(result["Author match method"], "full author list")
         self.assertEqual(result["Author match count"], 2)
-        self.assertEqual(result["Validation Result"], "✅ Real")
+        self.assertEqual(result["Validation Result"], "✅ Sufficient match")
 
     async def test_wrong_coauthor_prevents_real_even_when_first_author_matches(self) -> None:
         corrupted = STERN_REFERENCE.replace("Piatkowska", "Invented")
@@ -244,8 +257,22 @@ class FullAuthorPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["author_ok"])
         self.assertTrue(result["First author matches"])
         self.assertEqual(result["Author match count"], 1)
-        self.assertEqual(result["Validation Result"], "⚠ Suspicious")
+        self.assertEqual(result["Validation Result"], "🟠 Citation details need checking")
         self.assertIn("author list conflicts", result["Notes"])
+
+    async def test_omitted_coauthor_preserves_match_with_incomplete_note(self) -> None:
+        reference = STERN_REFERENCE.replace(
+            "Stern, Claudio D, and Agnieszka M Piatkowska.",
+            "Stern, Claudio D.",
+        )
+        result = await self.validate(reference)
+
+        self.assertTrue(result["author_ok"])
+        self.assertEqual(result["Author match method"], "incomplete author list")
+        self.assertEqual(result["Omitted author count"], 1)
+        self.assertEqual(result["Wrong author count"], 0)
+        self.assertEqual(result["Validation Result"], core.SUFFICIENT_MATCH_LABEL)
+        self.assertIn("author list incomplete", result["Notes"])
 
     async def test_unicode_pysek_reference_passes_the_full_pipeline(self) -> None:
         class PysekResponse:
@@ -270,7 +297,7 @@ class FullAuthorPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["Metadata Authors"], "Pyšek, Prach")
         self.assertTrue(result["author_ok"])
         self.assertEqual(result["Score"], 15)
-        self.assertEqual(result["Validation Result"], "✅ Real")
+        self.assertEqual(result["Validation Result"], "✅ Sufficient match")
 
 
 if __name__ == "__main__":

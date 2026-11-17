@@ -76,12 +76,12 @@ class EvidenceReviewTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(case=name):
                 result = await validate_case(core, reference, metadata)
                 if truth == "genuine":
-                    self.assertEqual(result["Validation Result"], "✅ Real", result["Notes"])
+                    self.assertEqual(result["Validation Result"], "✅ Sufficient match", result["Notes"])
                 elif truth == "uncertain":
                     self.assertEqual(result["Validation Result"], core.UNVERIFIED_LABEL, result["Notes"])
                     self.assertEqual(result["Comparison evidence"]["authors"]["status"], "unknown")
                 else:
-                    self.assertIn(result["Validation Result"], {"⚠ Suspicious", "❌ possible falsification"}, result["Notes"])
+                    self.assertIn(result["Validation Result"], {"🟠 Citation details need checking", "🔴 Major mismatch"}, result["Notes"])
 
     async def test_bucher_all_fields_extracted_and_matched(self):
         case = CASES["bucher"]
@@ -129,7 +129,7 @@ class EvidenceReviewTests(unittest.IsolatedAsyncioTestCase):
     async def test_resolver_failure_does_not_erase_known_wrong_authors(self):
         case = CASES["hogervorst"]
         result = await validate_case(core, case["reference"].replace("Richards", "Invented"), case["metadata"], resolver=None)
-        self.assertEqual(result["Validation Result"], "⚠ Suspicious")
+        self.assertEqual(result["Validation Result"], "🟠 Citation details need checking")
         self.assertIn("author list conflicts", result["Notes"])
 
     async def test_optional_review_lookup_failure_preserves_conflicts(self):
@@ -141,7 +141,7 @@ class EvidenceReviewTests(unittest.IsolatedAsyncioTestCase):
         resp.json.return_value = metadata
         with patch.object(core, "fetch_pubmed", AsyncMock(return_value=resp)), patch.object(core, "fetch_pubmed_efetch_xml", AsyncMock(side_effect=TimeoutError)):
             result = await core.validate_single_ref(None, "Invented, A. (2020) ‘A sufficiently distinctive reference title’, Journal of Examples. PMID:12345678", check_reviews=True)
-        self.assertEqual(result["Validation Result"], "⚠ Suspicious")
+        self.assertEqual(result["Validation Result"], "🟠 Citation details need checking")
 
 
 class ExtractionBoundaryTests(unittest.TestCase):

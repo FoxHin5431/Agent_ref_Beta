@@ -36,7 +36,7 @@ class PhysicsUITests(unittest.TestCase):
         self.assertFalse(app.exception, [error.message for error in app.exception])
         results = app.session_state["validation_results"]
         self.assertEqual(len(results), 20)
-        self.assertTrue(all(row["Validation Result"] == "✅ Real" for row in results))
+        self.assertTrue(all(row["Validation Result"] == "✅ Sufficient match" for row in results))
         self.assertTrue(all(row["Metadata Source"] == "arXiv" for row in results))
         self.assertTrue(any("NASA ADS: configured" in c.value for c in app.caption))
         workbook = load_workbook(io.BytesIO(build_excel_workbook(pd.DataFrame(results))))
