@@ -840,11 +840,11 @@ def style_part_by_part(df: pd.DataFrame):
 
 def _result_tone(label: str) -> str:
     label_lower = (label or "").lower()
-    if "major mismatch" in label_lower or "error" in label_lower:
+    if "major mismatch" in label_lower or "possible falsification" in label_lower or "error" in label_lower:
         return "danger"
-    if "citation details need checking" in label_lower or "manual review" in label_lower:
+    if "citation details need checking" in label_lower or "suspicious" in label_lower or "manual review" in label_lower:
         return "warning"
-    if "sufficient match" in label_lower:
+    if "sufficient match" in label_lower or label_lower == "✅ real":
         return "real"
     return "review"
 
@@ -904,14 +904,18 @@ if stored_results:
     counts = df["Validation Result"].value_counts()
 
     total_count = int(len(df))
-    real_count = int(counts.get(SUFFICIENT_MATCH_LABEL, 0))
-    manual_count = int(counts.get(MANUAL_REVIEW_LABEL, 0)) + int(counts.get(UNVERIFIED_LABEL, 0))
+    real_count = int(counts.get("✅ Sufficient match", 0) + counts.get("✅ Real", 0))
+    manual_count = int(sum(count for label, count in counts.items()
+                           if "manual review" in label.lower() or "could not verify" in label.lower()
+                           or "unable to verify" in label.lower()))
     web_count = int(
         counts.get("📄 Web Source (trusted)", 0)
         + counts.get("📄 Web Source", 0)
     )
-    suspicious_count = int(counts.get(CITATION_DETAILS_LABEL, 0))
-    false_count = int(counts.get(MAJOR_MISMATCH_LABEL, 0))
+    suspicious_count = int(counts.get("🟠 Citation details need checking", 0)
+                           + counts.get("⚠ Suspicious", 0))
+    false_count = int(counts.get("🔴 Major mismatch", 0)
+                      + counts.get("❌ possible falsification", 0))
     error_count = int(counts.get("❌ Error", 0))
 
     st.markdown('<div class="ar-section-kicker">Results</div>', unsafe_allow_html=True)
@@ -985,12 +989,13 @@ if stored_results:
         if active_filter == "all":
             return True
         if active_filter == "real":
-            return "sufficient match" in label
+            return "sufficient match" in label or label == "✅ real"
         if active_filter == "review":
-            return "manual review" in label or "web source" in label or "could not verify" in label
+            return ("manual review" in label or "web source" in label or
+                    "could not verify" in label or "unable to verify" in label)
         if active_filter == "suspicious":
-            return "citation details need checking" in label
-        return "major mismatch" in label or "error" in label
+            return "citation details need checking" in label or "suspicious" in label
+        return "major mismatch" in label or "possible falsification" in label or "error" in label
 
     filtered_indices = [
         index for index in range(len(df))

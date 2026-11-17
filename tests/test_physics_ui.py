@@ -38,6 +38,18 @@ class PhysicsUITests(unittest.TestCase):
         self.assertEqual(len(results), 20)
         self.assertTrue(all(row["Validation Result"] == "✅ Sufficient match" for row in results))
         self.assertTrue(all(row["Metadata Source"] == "arXiv" for row in results))
+        # An existing results session must still render if Streamlit has an
+        # older core module loaded while the interface code refreshes.
+        labels = {name: getattr(core, name) for name in
+                  ("SUFFICIENT_MATCH_LABEL", "CITATION_DETAILS_LABEL", "MAJOR_MISMATCH_LABEL")}
+        try:
+            for name in labels:
+                delattr(core, name)
+            app.run()
+            self.assertFalse(app.exception, [error.message for error in app.exception])
+        finally:
+            for name, value in labels.items():
+                setattr(core, name, value)
         self.assertTrue(any("NASA ADS: configured" in c.value for c in app.caption))
         workbook = load_workbook(io.BytesIO(build_excel_workbook(pd.DataFrame(results))))
         headers = [c.value for c in workbook["Results"][1]]
