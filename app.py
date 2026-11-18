@@ -12,18 +12,16 @@ from datetime import date
 from difflib import SequenceMatcher
 import unicodedata
 import uuid
-import hashlib
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
 from agent_ref_validator.core import *  # Shared validator public API
 from agent_ref_validator.exports import compute_doi_score
-from agent_ref_validator.run_records import MODULES, S390_CHOICES, module_details, save_check
+from agent_ref_validator.run_records import MODULES, S390_CHOICES, module_details
 from export_safeguards import (
     ACKNOWLEDGEMENT, build_guarded_excel, clean_file_identifier,
     export_eligible, export_filename, results_signature,
 )
-from beta_logging import configured_db_url, log_export_request
 
 # =========================
 # Streamlit UI
@@ -496,7 +494,6 @@ def configured_ads_token():
         return os.environ.get("ADS_API_TOKEN", "")
 
 ads_api_token = configured_ads_token()
-logging_db_url = configured_db_url(st.secrets, os.environ)
 st.sidebar.caption("arXiv: enabled · NASA ADS: " + ("configured" if ads_api_token else "token required"))
 if st.session_state.get("validator_sha256") != VALIDATOR_SHA256:
     st.session_state["validation_results"] = []
@@ -627,31 +624,6 @@ def reset_export_acknowledgement():
     st.session_state["export_acknowledged"] = False
 
 
-def record_export_and_reset(db_url: str, filename: str, report_sha256: str):
-    st.session_state["export_logging_issue"] = ""
-    try:
-        if db_url and export_eligible(
-            st.session_state.get("file_identifier", ""),
-            st.session_state.get("export_acknowledged", False),
-        ):
-            log_export_request(
-                db_url,
-                file_identifier=st.session_state["file_identifier"],
-                run_id=st.session_state.get("logged_run_id"),
-                findings=st.session_state.get("validation_results", []),
-                validator_version=VALIDATOR_VERSION,
-                filename=filename,
-                report_sha256=report_sha256,
-            )
-            st.session_state["export_logging_issue"] = ""
-    except Exception:
-        st.session_state["export_logging_issue"] = (
-            "The report download was requested, but its Neon log could not be saved."
-        )
-    finally:
-        reset_export_acknowledgement()
-
-
 def trim_file_identifier():
     st.session_state["file_identifier"] = clean_file_identifier(
         st.session_state.get("file_identifier", "")
@@ -732,11 +704,7 @@ if user_input.strip():
     if warns:
         st.warning("Reference formatting may be inconsistent:\n\n- " + "\n- ".join(warns))
 
-st.caption(
-    "Checks record submitted references and findings in Neon; report download requests "
-    "record a file identifier and summary."
-    if logging_db_url else "Local Beta checks are not recorded in Neon because logging is not configured."
-)
+st.caption("Beta checks and downloads are not recorded in Neon. Only the pilot records them.")
 if selected_module is None:
     st.info("Choose a module before checking references. S390 and Other need one more detail.")
 
@@ -1000,8 +968,6 @@ def _result_tone(label: str) -> str:
 if run_clicked and selected_module is not None:
     refs: list[str] = []
     results: list[dict] = []
-    error_text = None
-    st.session_state["logged_run_id"] = None
 
     try:
         refs = ready_refs or split_references(user_input)
@@ -1038,24 +1004,12 @@ if run_clicked and selected_module is not None:
             st.session_state["results_module"] = selected_module
 
     except Exception as exc:
-        error_text = str(exc)
         st.error(
             "Agent Ref could not finish this check. Your references are still "
             "in the input box, so you can try again."
         )
         if debug_mode:
             st.exception(exc)
-    finally:
-        if logging_db_url:
-            try:
-                st.session_state["logged_run_id"] = save_check(
-                    logging_db_url, app_name="Agent_ref_Beta", module=selected_module,
-                    input_text=user_input, split_refs=refs, findings=results,
-                    validator_version=VALIDATOR_VERSION, check_reviews=check_reviews,
-                    error_text=error_text,
-                )
-            except Exception:
-                st.warning("This check could not be recorded in Neon. Results remain available below.")
 
 stored_results = st.session_state.get("validation_results", [])
 current_results_signature = results_signature(stored_results)
@@ -1392,12 +1346,8 @@ if stored_results:
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
             disabled=not eligible_to_export,
-            on_click=record_export_and_reset,
-            args=(logging_db_url, report_filename,
-                  hashlib.sha256(export_bytes).hexdigest() if eligible_to_export else ""),
+            on_click=reset_export_acknowledgement,
         )
-        if st.session_state.get("export_logging_issue"):
-            st.warning(st.session_state["export_logging_issue"])
 
 
 st.markdown(

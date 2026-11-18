@@ -8,13 +8,12 @@ APP_PATH = Path(__file__).resolve().parents[1] / "app.py"
 
 
 class UiLinkTests(unittest.TestCase):
-    def test_beta_uses_configured_neon_logging(self) -> None:
+    def test_beta_does_not_write_neon_logs(self) -> None:
         source = APP_PATH.read_text(encoding="utf-8")
 
-        self.assertIn("save_check(", source)
-        self.assertIn("configured_db_url(st.secrets, os.environ)", source)
-        self.assertIn("log_export_request(", source)
-        self.assertIn("Local Beta checks are not recorded in Neon", source)
+        self.assertNotIn("save_check(", source)
+        self.assertNotIn("log_export_request(", source)
+        self.assertIn("Beta checks and downloads are not recorded in Neon", source)
 
     def test_regex_inspector_link_is_present(self) -> None:
         source = APP_PATH.read_text(encoding="utf-8")
