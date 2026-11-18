@@ -1,10 +1,10 @@
 {
-  "version": "2026.11.17.1",
+  "version": "2026.11.18.1",
   "source_repository": "https://github.com/FoxHin5431/reference_checker",
   "source_path": "agent_ref_validator",
   "files": {
     "__init__.py": "5214229d68fb1dfe7406ce911b3470cf09a79e02bf8af8b730b31b6af7f310bd",
-    "core.py": "04aaf700811db3625715fecbab955fd2086ecc2e732aa4e497bef9a7b57e63ba",
+    "core.py": "736446ffb2d59db8a1039960479cb3a1754414f237b0602ca78c5cc0a0f48c0f",
     "exports.py": "fc3cc69ac3f39d0ed4644b0e0b99ff29bc9b6a5900c5809202cfd579969a4a74",
     "run_records.py": "bd15d8ea06ac103c3633e4cb087124004ccaa912bce6d978b23af7380a653b4e",
     "tests/core_loader.py": "33db6ba39bf9bf254de63dbd236fa836a970dc31857ba7c0332db036ed025780",
@@ -12,7 +12,7 @@
     "tests/test_academic_url_routing.py": "8defdcb3485fb8d4413fc0ac569fe7ae12b993f7815ca9be287b35078e6ce0dc",
     "tests/test_derived_doi.py": "3ae5bfbccfd7d539f345a4f8af46948397f064d7eef860b64b7c92a1756e1381",
     "tests/test_evidence_review.py": "87de082b1bbde65dae6a2e65ccdc601c25b4c632369f580773939accda684bf5",
-    "tests/test_full_authors.py": "fd53370a37422cd3dc4ef3d93c68bb21015d3d73d3a51365c278d0727bbfda38",
+    "tests/test_full_authors.py": "25ce6bcb9713b256483d6788e8cb27d527d9872247f937f1f06cbab910cef191",
     "tests/test_physics_sources.py": "f6a88b98b37a21db5f6b7dbe991bf10c8fbd48c2fab9559ab64e5504e46c6beb",
     "tests/test_reference_splitting.py": "367495531746f26ea799952f324f86e98ba4c9327c4842e75e7036b711a30fdc",
     "tests/test_run_records.py": "7bc1749f11ddf9630cb84ac2baab43ab173e5c0949634369403fcad35c04c88e",
