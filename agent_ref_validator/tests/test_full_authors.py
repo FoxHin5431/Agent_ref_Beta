@@ -136,6 +136,69 @@ class FullAuthorExtractionTests(unittest.TestCase):
 
 
 class FullAuthorComparisonTests(unittest.TestCase):
+    def test_author_outcomes_and_conservative_variants(self) -> None:
+        record = ["Stern", "Piatkowska", "Walley"]
+        exact = core.compare_author_lists(record, record)
+        omitted = core.compare_author_lists(["Stern"], record)
+        ordered = core.compare_author_lists(["Stern", "Walley", "Piatkowska"], record)
+        wrong = core.compare_author_lists(["Stern", "Invented", "Walley"], record)
+        inserted = core.compare_author_lists(["Stern", "Piatkowska", "Extra", "Walley"], record)
+        variant = core.compare_author_lists(["Stern", "Piatkowksa", "Walley"], record)
+        unknown = core.compare_author_lists(["Stern"], [])
+        self.assertEqual(exact["method"], "full author list")
+        self.assertEqual(omitted["omitted_names"], ["Piatkowska", "Walley"])
+        self.assertTrue(omitted["ok"])
+        self.assertFalse(ordered["ok"])
+        self.assertEqual(ordered["method"], "different author order")
+        self.assertEqual(wrong["wrong_names"], ["Invented"])
+        self.assertEqual(inserted["wrong_names"], ["Extra"])
+        self.assertFalse(inserted["ok"])
+        self.assertFalse(variant["ok"])  # transposition is unresolved
+        self.assertEqual(unknown["method"], "no metadata authors")
+        self.assertFalse(unknown["ok"])
+
+    def test_nearby_distinct_names_are_not_forced_to_match(self) -> None:
+        for supplied, record in (("Martin", "Martinez"), ("Smith", "Smithson"),
+                                 ("Anderson", "Andersen"), ("Li", "Liu")):
+            with self.subTest(supplied=supplied):
+                self.assertFalse(core.surname_match(supplied, record))
+        self.assertTrue(core.surname_match("García-Márquez", "Garcia Marquez"))
+        self.assertTrue(core.surname_match("Piatkowska", "Piatkobska"))
+        variant = core.compare_author_lists(["Garcia Marquez", "Piatkobska"],
+                                            ["García-Márquez", "Piatkowska"])
+        self.assertTrue(variant["ok"])
+        self.assertEqual(variant["method"], "minor surname variant")
+        self.assertEqual(variant["variant_names"], ["Garcia Marquez", "Piatkobska"])
+
+    def test_repeated_surname_requires_distinct_record_authors(self) -> None:
+        self.assertTrue(core.compare_author_lists(["Kim", "Kim"], ["Kim", "Kim"])["ok"])
+        comparison = core.compare_author_lists(["Kim", "Kim"], ["Kim", "Lee"])
+        self.assertFalse(comparison["ok"])
+        self.assertEqual(comparison["wrong_names"], ["Kim"])
+
+    def test_et_al_note_distinguishes_later_author_from_wrong_name(self) -> None:
+        details = core.describe_author_conflicts(
+            ["Chen", "Wu", "Feng", "Tsai"],
+            ["Chen", "Wu", "Feng", "Fan", "Lu", "Xu", "Tsai"],
+            uses_et_al=True,
+        )
+        self.assertEqual(len(details), 1)
+        self.assertIn("Tsai is named as author 4, but is author 7", details[0])
+        self.assertIn("Fan, Lu, Xu appear before Tsai", details[0])
+        self.assertNotIn("not found", details[0])
+
+    def test_general_author_discrepancy_notes(self) -> None:
+        metadata = ["Chen", "Wu", "Feng", "Fan", "Lu", "Xu", "Tsai"]
+        missing = core.compare_author_lists(["Chen", "Wu", "Feng", "Tsai"], metadata)
+        self.assertTrue(missing["ok"])
+        self.assertEqual(missing["omitted_names"], ["Fan", "Lu", "Xu"])
+        reordered = core.describe_author_conflicts(
+            ["Chen", "Feng", "Wu"], metadata, uses_et_al=False)
+        self.assertTrue(any("different order" in note for note in reordered))
+        wrong = core.describe_author_conflicts(
+            ["Chen", "Invented"], metadata, uses_et_al=False)
+        self.assertTrue(any("Invented" in note and "not found" in note for note in wrong))
+
     def test_complete_list_requires_broad_coverage(self) -> None:
         comparison = core.compare_author_lists(
             ["Paisley", "Trigg", "Walley"],
@@ -270,9 +333,53 @@ class FullAuthorPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["author_ok"])
         self.assertEqual(result["Author match method"], "incomplete author list")
         self.assertEqual(result["Omitted author count"], 1)
+        self.assertEqual(result["Omitted Authors"], "Piatkowska")
         self.assertEqual(result["Wrong author count"], 0)
         self.assertEqual(result["Validation Result"], core.SUFFICIENT_MATCH_LABEL)
         self.assertIn("author list incomplete", result["Notes"])
+        self.assertIn("Piatkowska", result["Notes"])
+
+    async def test_matched_doi_title_with_wrong_author_is_not_major(self) -> None:
+        result = await self.validate(STERN_REFERENCE.replace("Piatkowska", "Invented"))
+        self.assertEqual(result["Validation Result"], core.CITATION_DETAILS_LABEL)
+        self.assertIn("Invented", result["Notes"])
+        self.assertNotIn("metadata (author/title/journal/year/vol/issue/pages)", result["Notes"])
+
+    async def test_et_al_named_author_later_in_record_is_explained(self) -> None:
+        reference = STERN_REFERENCE.replace(
+            "Stern, Claudio D, and Agnieszka M Piatkowska.",
+            "Stern, C., Walley, W. et al.",
+        )
+        metadata = {**STERN_METADATA, "author": [
+            {"family": "Stern"}, {"family": "Piatkowska"}, {"family": "Walley"},
+        ]}
+
+        async def fetch_crossref(_client, _doi):
+            class Response:
+                status_code = 200
+
+                def json(self):
+                    return {"message": metadata}
+
+            return Response()
+
+        async def doi_resolves(_client, _doi):
+            return True
+
+        with (patch.object(core, "fetch_crossref_doi", fetch_crossref),
+              patch.object(core, "check_doi_org_head", doi_resolves)):
+            result = await core.validate_single_ref(None, reference)
+
+        self.assertEqual(result["Extracted Authors"], "Stern, Walley")
+        self.assertIn("Walley is named as author 2, but is author 3", result["Notes"])
+        self.assertNotIn("not found in the retrieved author list", result["Notes"])
+
+    async def test_title_and_author_conflict_is_major(self) -> None:
+        reference = STERN_REFERENCE.replace("Piatkowska", "Invented").replace(
+            "Multiple roles of timing in somite formation", "An unrelated study of urban transport networks")
+        result = await self.validate(reference)
+        self.assertEqual(result["Validation Result"], core.MAJOR_MISMATCH_LABEL)
+        self.assertIn("Invented", result["Notes"])
 
     async def test_unicode_pysek_reference_passes_the_full_pipeline(self) -> None:
         class PysekResponse:

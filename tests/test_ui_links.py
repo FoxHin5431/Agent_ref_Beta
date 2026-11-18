@@ -8,12 +8,12 @@ APP_PATH = Path(__file__).resolve().parents[1] / "app.py"
 
 
 class UiLinkTests(unittest.TestCase):
-    def test_beta_does_not_record_reference_checks(self) -> None:
+    def test_beta_does_not_write_neon_logs(self) -> None:
         source = APP_PATH.read_text(encoding="utf-8")
 
-        self.assertNotIn("save_check", source)
-        self.assertNotIn("DB_URL", source)
-        self.assertIn("Beta checks are for testing and are not recorded in Neon.", source)
+        self.assertNotIn("save_check(", source)
+        self.assertNotIn("log_export_request(", source)
+        self.assertIn("Beta checks and downloads are not recorded in Neon", source)
 
     def test_regex_inspector_link_is_present(self) -> None:
         source = APP_PATH.read_text(encoding="utf-8")
@@ -58,8 +58,9 @@ class UiLinkTests(unittest.TestCase):
         self.assertIn('selected.get("Source URL")', source)
         self.assertIn('st.column_config.LinkColumn(', source)
         self.assertIn('df.iloc[filtered_indices][overview_columns]', source)
-        self.assertIn('["Excel", "CSV"]', source)
-        self.assertIn('["Condensed", "Full"]', source)
+        self.assertIn('"Download Excel report"', source)
+        self.assertNotIn('"File type"', source)
+        self.assertNotIn('"Detail", ["Condensed", "Full"]', source)
 
 
 if __name__ == "__main__":

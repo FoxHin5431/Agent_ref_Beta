@@ -16,8 +16,12 @@ from pathlib import Path
 import xml.etree.ElementTree as ET
 
 from agent_ref_validator.core import *  # Shared validator public API
-from agent_ref_validator.exports import build_excel_workbook, compute_doi_score
+from agent_ref_validator.exports import compute_doi_score
 from agent_ref_validator.run_records import MODULES, S390_CHOICES, module_details
+from export_safeguards import (
+    ACKNOWLEDGEMENT, build_guarded_excel, clean_file_identifier,
+    export_eligible, export_filename, results_signature,
+)
 
 # =========================
 # Streamlit UI
@@ -71,6 +75,60 @@ complete submitted reference.
 Short, generic titles cannot pass through this fallback. Straight or curly
 single and double quotation marks are supported.
 """
+
+PRACTICAL_GUIDE_PAGE = "What do I do if…?"
+PRACTICAL_GUIDE_QUESTIONS = (
+    (
+        "What do I do if a reference is labelled 'Citation details need checking'?",
+        "Open the suggested matching record and compare its title, authors, year, journal and "
+        "identifier with the student's reference. Missing or incorrect bibliographic details "
+        "do not, by themselves, indicate academic misconduct.",
+    ),
+    (
+        "What do I do if a reference has a 'Major mismatch'?",
+        "Check the reference against the identified source. A substantial difference may mean "
+        "the citation details are incorrect or the wrong record was identified. This label "
+        "is not proof that a source was fabricated.",
+    ),
+    (
+        "What do I do if Agent Ref 'Could not verify' a reference?",
+        "Search independently using the title, authors, publisher or other available details. "
+        "Publisher websites, Crossref, PubMed, Google Scholar and subject databases may help. "
+        "Failure to retrieve a record does not establish that the source does not exist.",
+    ),
+    (
+        "What do I do if some authors are missing or different?",
+        "Check whether the title, DOI, year and other details identify the publication. An "
+        "incomplete author list is generally a referencing discrepancy. A wrong named author "
+        "needs checking but is not, by itself, evidence of fabrication. Agent Ref recognises "
+        "legitimate use of *et al.*.",
+    ),
+    (
+        "What do I do if a source is a website, report or another non-journal publication?",
+        "For a **Manual review — web source** result, check the original website or issuing "
+        "organisation. Compare the title, author or organisation, date and other available "
+        "details. These sources may not appear in bibliographic databases.",
+    ),
+    (
+        "What do I do if several references in a submission require checking?",
+        "Review each reference individually. The number flagged is not a measure of academic "
+        "misconduct. Look for explanations such as incomplete author lists, incorrect "
+        "identifiers or systematic referencing mistakes.",
+    ),
+    (
+        "What do I do if I am concerned that references may have been fabricated?",
+        "Manually verify the underlying sources and consider the wider submission. Follow the "
+        "University's current academic conduct procedures if independently established "
+        "concerns warrant escalation. Automated classifications alone must never be used "
+        "as grounds for referral.",
+    ),
+    (
+        "What do I do if I think Agent Ref has classified a reference incorrectly?",
+        "Manually check the reference and keep the submitted citation, retrieved record and "
+        "reason for concern together. Use your established local feedback or support route "
+        "to report the issue if one is available.",
+    ),
+)
 
 st.markdown(
     """
@@ -399,8 +457,15 @@ st.markdown(
     }
 
     [data-testid="stLinkButton"] a {
-        border-color: rgba(113, 255, 178, 0.45);
-        background: rgba(0, 229, 199, 0.12);
+        border-color: var(--ar-primary-dark);
+        background: var(--ar-primary);
+        color: white !important;
+    }
+
+    [data-testid="stLinkButton"] a:hover,
+    [data-testid="stLinkButton"] a:focus-visible {
+        border-color: var(--ar-primary-dark);
+        background: var(--ar-primary-dark);
         color: white !important;
     }
 
@@ -463,6 +528,7 @@ with st.sidebar:
             "How results are decided",
             "How authors are checked",
             "How titles are checked",
+            PRACTICAL_GUIDE_PAGE,
         ],
         key="page_choice",
         label_visibility="collapsed",
@@ -514,6 +580,24 @@ if page_choice != "Check references":
         st.header("How authors are checked")
         with st.container(border=True):
             st.markdown(AUTHORS_GUIDE_MD)
+    elif page_choice == PRACTICAL_GUIDE_PAGE:
+        st.header(PRACTICAL_GUIDE_PAGE)
+        st.caption("Practical guidance for reviewing references and interpreting Agent Ref results.")
+        st.warning(
+            "Agent Ref checks bibliographic information against retrieved records. "
+            "Results requiring manual checking are not evidence of fabricated references "
+            "or academic misconduct.\n\n"
+            "Do not use these labels alone as grounds for an academic conduct referral. "
+            "Check the original reference and source, and consider the wider student submission."
+        )
+        st.info(
+            "Agent Ref identifies bibliographic information that may need further checking. "
+            "It does not determine whether a student has fabricated references or committed "
+            "academic misconduct. **All results other than Sufficient match require manual checking.**"
+        )
+        for question, answer in PRACTICAL_GUIDE_QUESTIONS:
+            with st.expander(question):
+                st.markdown(answer)
     else:
         st.header("How titles are checked")
         with st.container(border=True):
@@ -534,6 +618,16 @@ def clear_ref_input():
     st.session_state["ref_input"] = ""
     st.session_state["validation_results"] = []
     st.session_state["last_checked_count"] = 0
+
+
+def reset_export_acknowledgement():
+    st.session_state["export_acknowledged"] = False
+
+
+def trim_file_identifier():
+    st.session_state["file_identifier"] = clean_file_identifier(
+        st.session_state.get("file_identifier", "")
+    )
 
 
 if "ref_input" not in st.session_state:
@@ -610,7 +704,7 @@ if user_input.strip():
     if warns:
         st.warning("Reference formatting may be inconsistent:\n\n- " + "\n- ".join(warns))
 
-st.caption("Beta checks are for testing and are not recorded in Neon.")
+st.caption("Beta checks and downloads are not recorded in Neon. Only the pilot records them.")
 if selected_module is None:
     st.info("Choose a module before checking references. S390 and Other need one more detail.")
 
@@ -621,6 +715,8 @@ if selected_module is None:
 
 def add_link_columns(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
+
+    out["Record link"] = out.apply(retrieved_record_link, axis=1)
 
     out["DOI link"] = out.apply(
         lambda r: (
@@ -650,7 +746,7 @@ def build_display_df(df: pd.DataFrame, *, view: str, include_review: bool) -> pd
     df2 = add_link_columns(df2)
 
     if view == "Condensed":
-        cols = ["Ref #", "Validation Result", "Score", "DOI score", "AI URL flag", "AL notes", "Notes", "Source link", "DOI link"]
+        cols = ["Ref #", "Validation Result", "Score", "DOI score", "AI URL flag", "AL notes", "Notes", "Record link", "Source link", "DOI link"]
         if include_review:
             cols.insert(3, "Is Review")
         for c in cols:
@@ -666,6 +762,7 @@ def build_display_df(df: pd.DataFrame, *, view: str, include_review: bool) -> pd
         "AI URL flag",
         "AL notes",
         "Extracted Authors", "Metadata Authors", "Author match method",
+        "Omitted Authors",
         "Author match count", "Submitted author count", "Metadata author count",
         "Is Review", "Review Source",
         "Reference",
@@ -676,6 +773,7 @@ def build_display_df(df: pd.DataFrame, *, view: str, include_review: bool) -> pd
         "Crossref DOI", "Crossref Journal", "Crossref Year",
         "PubMed ID", "PubMed Journal", "PubMed Year",
         "Notes",
+        "Record link",
         "Source link",
         "DOI link",
         "PubMed link",
@@ -705,6 +803,24 @@ def _display_text(value) -> str:
     if isinstance(value, float):
         return f"{value:.3f}"
     return html.unescape(str(value))
+
+
+def retrieved_record_link(row) -> str:
+    """Link only to a record actually returned by a metadata lookup."""
+    record_url = row.get("Metadata Record URL")
+    if isinstance(record_url, str) and urllib.parse.urlparse(record_url).scheme in {"http", "https"}:
+        return record_url
+    source = row.get("Metadata Source")
+    doi = row.get("Metadata DOI") or row.get("Crossref DOI")
+    if source == "Crossref" and isinstance(doi, str) and doi.strip():
+        return "https://doi.org/" + urllib.parse.quote(doi.strip().rstrip(".,;:)"), safe="/")
+    pmid = row.get("PubMed ID")
+    if source == "PubMed/PMC" and isinstance(pmid, str):
+        if pmid.isdigit():
+            return "https://pubmed.ncbi.nlm.nih.gov/" + pmid + "/"
+        if pmid.upper().startswith("PMC") and pmid[3:].isdigit():
+            return "https://pmc.ncbi.nlm.nih.gov/articles/" + pmid.upper() + "/"
+    return ""
 
 
 def _part_status(matches: bool, submitted, metadata) -> str:
@@ -896,6 +1012,11 @@ if run_clicked and selected_module is not None:
             st.exception(exc)
 
 stored_results = st.session_state.get("validation_results", [])
+current_results_signature = results_signature(stored_results)
+if st.session_state.get("export_results_signature") != current_results_signature:
+    st.session_state["export_acknowledged"] = False
+    st.session_state["file_identifier"] = ""
+    st.session_state["export_results_signature"] = current_results_signature
 if stored_results:
     df = pd.DataFrame(stored_results)
     recorded_module = st.session_state.get("results_module")
@@ -982,6 +1103,11 @@ if stored_results:
         )
 
     st.subheader("Review one reference")
+    st.button(
+        "Help interpreting this result",
+        key="result_guidance",
+        on_click=lambda: st.session_state.update(page_choice=PRACTICAL_GUIDE_PAGE),
+    )
     active_filter = st.session_state.get("result_filter", "all")
 
     def _is_in_active_filter(row: pd.Series) -> bool:
@@ -1038,6 +1164,30 @@ if stored_results:
     validator_notes = _display_text(selected.get("Notes"))
     st.markdown("**Validator notes**")
     st.info(validator_notes or "No additional validator notes were returned.")
+    st.markdown("**Check trusted source here:**")
+    record_link = retrieved_record_link(selected)
+    if record_link:
+        record_title = _display_text(selected.get("Metadata Title")).strip()
+        record_authors = _display_text(selected.get("Metadata Authors")).strip()
+        omitted_value = selected.get("Omitted Authors")
+        omitted_authors = omitted_value.strip() if isinstance(omitted_value, str) else ""
+        if not omitted_authors and bool(selected.get("Author list incomplete")):
+            submitted_names = [name.strip() for name in _display_text(selected.get("Extracted Authors")).split(",") if name.strip()]
+            record_names = [name.strip() for name in record_authors.split(",") if name.strip()]
+            omitted_authors = ", ".join(compare_author_lists(submitted_names, record_names)["omitted_names"])
+        if record_title:
+            st.caption("Title in retrieved record: " + record_title)
+        if record_authors:
+            st.caption("Authors in retrieved record: " + record_authors)
+        if omitted_authors and bool(selected.get("Author list incomplete")) and bool(selected.get("author_ok")) and not bool(selected.get("Uses et al.")):
+            st.warning("Missing from submitted reference: " + omitted_authors)
+        st.link_button("Open retrieved record ↗", record_link)
+        st.caption("Check the source itself. A retrieved record can belong to a different publication from the submitted citation.")
+    else:
+        st.caption("No retrieved publication record is available to open for this reference.")
+    submitted_url = selected.get("Source URL")
+    if isinstance(submitted_url, str) and urllib.parse.urlparse(submitted_url).scheme in {"http", "https"} and submitted_url != record_link:
+        st.link_button("Open URL supplied in the reference ↗", submitted_url)
     ai_notes = _display_text(selected.get("AL notes"))
     if ai_notes:
         st.warning(ai_notes)
@@ -1097,6 +1247,7 @@ if stored_results:
         ]
         overview = df.iloc[filtered_indices][overview_columns].copy()
         overview.columns = overview_labels
+        overview["Record link"] = df.iloc[filtered_indices].apply(retrieved_record_link, axis=1)
         overview_column_config = {
             "Reference": st.column_config.NumberColumn(
                 "Reference", width="small"
@@ -1110,6 +1261,9 @@ if stored_results:
             ),
             "Explanation": st.column_config.TextColumn(
                 "Explanation", width="large"
+            ),
+            "Record link": st.column_config.LinkColumn(
+                "Record link", display_text="Open record", width="small"
             ),
         }
         st.dataframe(
@@ -1157,60 +1311,42 @@ if stored_results:
     st.markdown('<div class="ar-section-kicker">Export</div>', unsafe_allow_html=True)
     st.header("Download results")
     with st.container(border=True):
-        file_name_col, type_col, detail_col = st.columns([2.3, 1.25, 1.25])
-        with file_name_col:
-            prefix_input = st.text_input(
-                "Optional file name",
-                value=st.session_state.get("prefix", ""),
-                placeholder="For example: cohort-a",
-                help="This text is added to the start of the downloaded file name.",
-            )
-            st.session_state["prefix"] = prefix_input
-        with type_col:
-            export_type = st.selectbox("File type", ["Excel", "CSV"])
-        with detail_col:
-            export_detail = st.selectbox("Detail", ["Condensed", "Full"])
+        st.text_input("File identifier", key="file_identifier", on_change=trim_file_identifier)
+        st.caption(
+            "Enter a file code you can recognise later. It will appear in the Excel report. "
+            "Avoid student names or other personal details."
+        )
+        st.checkbox(ACKNOWLEDGEMENT, key="export_acknowledged")
+        eligible_to_export = export_eligible(
+            st.session_state.get("file_identifier", ""),
+            st.session_state.get("export_acknowledged", False),
+        )
+        if not eligible_to_export:
+            st.info("Enter a file identifier and acknowledge the manual verification requirements to enable exporting.")
 
-        prefix = sanitize_prefix(prefix_input)
         today = date.today().isoformat()
+        report_filename = export_filename(st.session_state.get("file_identifier", ""), today)
         include_review = bool(
             st.session_state.get("results_detect_reviews", False)
         )
-
-        if export_type == "Excel":
-            export_bytes = build_excel_workbook(
+        export_bytes = (
+            build_guarded_excel(
                 df,
-                debug_mode=debug_mode and export_detail == "Full",
-                view=export_detail,
+                file_identifier=st.session_state.get("file_identifier", ""),
+                acknowledged=st.session_state.get("export_acknowledged", False),
                 include_review=include_review,
+                debug_mode=debug_mode,
             )
-            export_filename = (
-                f"{prefix}validated_references_"
-                f"{export_detail.lower()}_{today}.xlsx"
-            )
-            export_mime = (
-                "application/vnd.openxmlformats-officedocument."
-                "spreadsheetml.sheet"
-            )
-        else:
-            export_df = build_display_df(
-                df,
-                view=export_detail,
-                include_review=include_review,
-            )
-            export_bytes = export_df.to_csv(index=False).encode("utf-8-sig")
-            export_filename = (
-                f"{prefix}validated_references_"
-                f"{export_detail.lower()}_{today}.csv"
-            )
-            export_mime = "text/csv"
-
+            if eligible_to_export else b""
+        )
         st.download_button(
-            f"Download {export_detail.lower()} {export_type}",
+            "Download Excel report",
             export_bytes,
-            export_filename,
-            export_mime,
+            report_filename,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
+            disabled=not eligible_to_export,
+            on_click=reset_export_acknowledgement,
         )
 
 

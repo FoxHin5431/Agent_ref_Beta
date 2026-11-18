@@ -14,7 +14,7 @@ import os
 import threading
 import time
 
-VALIDATOR_VERSION = "2026.11.17.1"
+VALIDATOR_VERSION = "2026.11.18.1"
 # Normalize line endings so Windows and Linux identify the same source.
 VALIDATOR_SHA256 = hashlib.sha256(Path(__file__).read_text(encoding="utf-8").encode("utf-8")).hexdigest()
 
@@ -731,11 +731,15 @@ def surname_match(submitted_surname: str, metadata_surname: str) -> bool:
         return False
     if submitted == metadata:
         return True
-    if min(len(submitted), len(metadata)) >= 5 and (
-        submitted.startswith(metadata) or metadata.startswith(submitted)
-    ):
-        return True
-    return similar(submitted, metadata) >= 0.84
+    # A single internal transcription error in a long surname is plausible.
+    # Prefixes and general similarity also accept distinct family names (for
+    # example, Martin and Martinez), so neither is evidence of agreement.
+    return bool(
+        len(submitted) == len(metadata) >= 8
+        and submitted[:3] == metadata[:3]
+        and submitted[-2:] == metadata[-2:]
+        and sum(a != b for a, b in zip(submitted, metadata)) == 1
+    )
 
 
 def metadata_author_surnames(authors: object) -> list[str]:
@@ -800,6 +804,10 @@ def compare_author_lists(
         "wrong_count": 0,
         "incomplete": False,
         "contradictory": False,
+        "variant_names": [],
+        "wrong_names": [],
+        "omitted_names": [],
+        "order_changed": False,
     }
     if not submitted:
         result["method"] = "no submitted authors extracted"
@@ -820,6 +828,10 @@ def compare_author_lists(
         result["submitted_coverage"] = matched / len(submitted)
         result["metadata_coverage"] = matched / len(metadata)
         result["wrong_count"] = len(submitted) - matched
+        result["wrong_names"] = [name for index, name in enumerate(submitted)
+                                 if index >= len(metadata) or not surname_match(name, metadata[index])]
+        result["variant_names"] = [name for name, record in zip(submitted, metadata)
+                                   if surname_match(name, record) and name != record]
         result["contradictory"] = bool(result["wrong_count"])
         result["ok"] = bool(
             result["first_author_ok"]
@@ -831,6 +843,9 @@ def compare_author_lists(
 
     unmatched_metadata = set(range(len(metadata)))
     matched = 0
+    matched_indices = []
+    wrong_names = []
+    variant_names = []
     for submitted_name in submitted:
         match_index = next(
             (
@@ -843,6 +858,11 @@ def compare_author_lists(
         if match_index is not None:
             unmatched_metadata.remove(match_index)
             matched += 1
+            matched_indices.append(match_index)
+            if submitted_name != metadata[match_index]:
+                variant_names.append(submitted_name)
+        else:
+            wrong_names.append(submitted_name)
 
     submitted_coverage = matched / len(submitted)
     metadata_coverage = matched / len(metadata)
@@ -857,6 +877,10 @@ def compare_author_lists(
             "wrong_count": wrong_count,
             "incomplete": omitted_count > 0 and wrong_count == 0,
             "contradictory": wrong_count > 0 or not result["first_author_ok"],
+            "wrong_names": wrong_names,
+            "omitted_names": [metadata[index] for index in sorted(unmatched_metadata)] if not wrong_names else [],
+            "variant_names": variant_names,
+            "order_changed": matched == len(submitted) and matched_indices != sorted(matched_indices),
         }
     )
 
@@ -868,10 +892,14 @@ def compare_author_lists(
     result["ok"] = bool(
         result["first_author_ok"]
         and submitted_coverage == 1.0
+        and not result["order_changed"]
     )
+    result["contradictory"] |= result["order_changed"]
     result["method"] = (
-        "full author list" if result["ok"] and not result["incomplete"]
-        else "incomplete author list" if result["ok"]
+        "different author order" if result["order_changed"]
+        else "incomplete author list" if result["ok"] and result["incomplete"]
+        else "minor surname variant" if result["ok"] and result["variant_names"]
+        else "full author list" if result["ok"]
         else "named-author mismatch"
     )
     return result
@@ -901,10 +929,61 @@ def author_comparison_fields(
         "Author metadata coverage": round(comparison["metadata_coverage"], 3),
         "First author matches": bool(comparison["first_author_ok"]),
         "Omitted author count": int(comparison["omitted_count"]),
+        "Omitted Authors": ", ".join(comparison["omitted_names"]),
         "Wrong author count": int(comparison["wrong_count"]),
         "Author list incomplete": bool(comparison["incomplete"]),
         "Author list contradictory": bool(comparison["contradictory"]),
     }
+
+
+def describe_author_conflicts(
+    submitted: list[str], metadata: list[str], *, uses_et_al: bool,
+) -> list[str]:
+    """Explain absent and reordered names from the compared author lists."""
+    details = []
+    matched_positions = []
+    available = set(range(len(metadata)))
+    for position, name in enumerate(submitted):
+        if uses_et_al and position < len(metadata) and surname_match(name, metadata[position]):
+            continue
+        matches = [index for index, record_name in enumerate(metadata)
+                   if (uses_et_al or index in available)
+                   and surname_match(name, record_name)]
+        if not uses_et_al:
+            if matches:
+                matched_positions.append(matches[0])
+                available.remove(matches[0])
+            else:
+                if any(surname_match(name, record_name) for record_name in metadata):
+                    details.append(f"{name} has no distinct matching author in the retrieved author list")
+                else:
+                    details.append(f"{name} is named in the submitted reference but not found in the retrieved author list")
+            continue
+        if len(matches) == 1:
+            record_position = matches[0]
+            detail = (f"{name} is named as author {position + 1}, but is author "
+                      f"{record_position + 1} in the retrieved record")
+            if record_position > position:
+                preceding = metadata[position:record_position]
+                if preceding:
+                    detail += "; " + ", ".join(preceding) + f" appear before {name} in that record"
+            details.append(detail)
+        elif not matches:
+            details.append(f"{name} is named in the submitted reference but not found in the retrieved author list")
+        else:
+            details.append(f"{name} does not match author {position + 1} in the retrieved record")
+    if not uses_et_al and matched_positions and metadata:
+        if submitted and not surname_match(submitted[0], metadata[0]):
+            first_positions = [index for index, record_name in enumerate(metadata)
+                               if surname_match(submitted[0], record_name)]
+            if len(first_positions) == 1:
+                details.append(f"{submitted[0]} is named first, but is author {first_positions[0] + 1} in the retrieved record")
+            else:
+                details.append(f"the first named author differs from the retrieved record's first author, {metadata[0]}")
+        if matched_positions != sorted(matched_positions):
+            details.append("named authors appear in a different order: submitted "
+                           + ", ".join(submitted) + "; retrieved " + ", ".join(metadata))
+    return details
 
 def title_similarity(a: str, b: str) -> float:
     a2 = re.sub(r"\s+", " ", (a or "").strip())
@@ -1397,7 +1476,7 @@ def score_result(
         return (
             MAJOR_MISMATCH_LABEL,
             "DOI resolves but both the submitted author list and title mismatch "
-            "(likely wrong DOI or fabricated pairing)",
+            "(check whether the identifier belongs to this citation)",
             weighted_score
         )
 
@@ -2419,7 +2498,16 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
         reason = (reason + "; " if reason else "") + (
             f"author list incomplete: {author_comparison['omitted_count']} "
             "metadata author(s) omitted"
+            + (" (" + ", ".join(author_comparison["omitted_names"]) + ")" if author_comparison["omitted_names"] else "")
         )
+    if field_evidence["authors"]["status"] == "conflicting":
+        details = describe_author_conflicts(
+            submitted_authors, metadata_authors, uses_et_al=submitted_uses_et_al,
+        )
+        if details:
+            reason = (reason + "; " if reason else "") + "; ".join(details)
+    if author_comparison["variant_names"] and field_evidence["authors"]["status"] == "matched":
+        reason = (reason + "; " if reason else "") + "minor author spelling variant: " + ", ".join(author_comparison["variant_names"])
 
     if doi_invalid:
         reason = (reason + ("; " if reason else "") + "DOI not found by Crossref or the resolver").strip("; ")
@@ -2433,10 +2521,6 @@ async def validate_single_ref(client, ref, debug_mode=False, check_reviews: bool
             + ("; " if reason else "")
             + "derived DOI used for metadata only; no DOI points awarded"
         ).strip("; ")
-
-    if doi_explicit_ok and result in {CITATION_DETAILS_LABEL, MAJOR_MISMATCH_LABEL}:
-        reason = (reason + ("; " if reason else "") +
-                  "DOI resolves but metadata (author/title/journal/year/vol/issue/pages) mismatches").strip("; ")
 
     if (not doi_val and not pmid_val) and 'match_reason' in locals() and match_reason:
         reason = (reason + ("; " if reason else "") + match_reason)
