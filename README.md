@@ -9,7 +9,17 @@ The aim is not to decide whether a student has committed academic misconduct. Ag
 **Try the current beta:**  
 https://agent-ref-beta.streamlit.app/
 
-Beta reference checks are for testing. The app does not record submitted references or findings in Neon.
+Beta reference checks are for testing. When a Neon `DB_URL` is configured, Beta records
+checks in the existing `agent_ref_reference_checks_v2` table, as the pilot does. This
+includes submitted reference text and findings. Excel download requests are recorded
+in `agent_ref_beta_exports_v1` with the user-supplied file identifier, check run ID,
+result summary, filename and report hash. A download request does not prove that the
+browser finished saving the file or that anyone manually verified a source.
+
+Apply `sql/2026-11-18_beta_exports_v1.sql` to the same Neon database before enabling
+Beta logging. Set `DB_URL` in the deployed app's Streamlit secrets; optional
+`LOGGING_ENABLED = false` disables logging. Without a configured URL, local checks and
+downloads are not recorded. Do not put database credentials in the repository.
 
 > Agent Ref is an independent beta project developed by Mark Hintze, Lecturer in Biology at The Open University. It is not an official Open University service.
 
